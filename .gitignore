@@ -1,0 +1,5 @@
+.env
+log/*
+__pycache__/
+log_playwright/*
+config.json
