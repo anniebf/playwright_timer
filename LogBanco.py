@@ -146,18 +146,35 @@ def is_valid_timestamp(timestamp_str):
     except ValueError:
         return False
 
-def resultado():
+def resultado(id_execucao_atual: int | None = None):
     connection = oracledb.connect(user=username, password=password, dsn=dsn)
     cursor = connection.cursor()
-    cursor.execute("""
-        SELECT TEMPO_EXECUCAO FROM RPA.TIMER 
-        WHERE DESCRICAO = 'FINALIZANDO PROTHEUS_TIR' 
-        FETCH FIRST ROW ONLY
-    """)
-    ultimo_resultados = cursor.fetchone()
-    ultimo_resultado = ultimo_resultados[0] if ultimo_resultados else 0
-    connection.close()
-    return ultimo_resultado
+    try:
+        filtro_execucao_atual = ""
+        parametros = {}
+        if id_execucao_atual is not None:
+            filtro_execucao_atual = "AND ID_EXECUCAO <> :id_execucao_atual"
+            parametros["id_execucao_atual"] = id_execucao_atual
+
+        cursor.execute(
+            f"""
+            SELECT AVG(TEMPO_EXECUCAO)
+            FROM (
+                SELECT TEMPO_EXECUCAO
+                FROM RPA.TIMER
+                WHERE DESCRICAO = 'FINALIZANDO PROTHEUS_TIR'
+                  AND ERRO = 'OK'
+                  {filtro_execucao_atual}
+                ORDER BY HORARIO_EXECUCAO DESC, ID_EXECUCAO DESC
+                FETCH FIRST 10 ROWS ONLY
+            )
+            """,
+            parametros,
+        )
+        media_resultado = cursor.fetchone()
+        return float(media_resultado[0]) if media_resultado and media_resultado[0] is not None else 0
+    finally:
+        connection.close()
 
 def registrar_timer(id_execucao, descricao, sistema, usuario, erro, tempo_execucao, timestamp_str):
     if not is_valid_timestamp(timestamp_str):
@@ -292,13 +309,18 @@ def salvar():
                 logger.error(f'Erro ao processar linha: {linha} - Erro: {e}')
     
     # Verificação final
-    ultimo_resultado = resultado()
+    media_resultado = resultado(id_execucao_atual=id_execucao)
     if erro:
         pass
     else:
         logger.info('Sem erro fatal, avaliando tempo de execução')
-        if ultimo_resultado and tempo_executado and ultimo_resultado >= tempo_executado * 1.3:
-            MandaEmail.enviar_temp_exc(tempo_executado,ultimo_resultado)
+        if media_resultado and tempo_executado and tempo_executado > media_resultado * 1.3:
+            logger.warning(
+                'Tempo atual acima de 30%% da média: atual=%ss, média=%ss',
+                tempo_executado,
+                round(media_resultado, 2),
+            )
+            MandaEmail.enviar_temp_exc(tempo_executado, media_resultado)
         else:
             logger.info('Tempo de execução dentro do esperado')
 

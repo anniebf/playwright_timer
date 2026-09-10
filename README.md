@@ -197,6 +197,7 @@ No Windows PowerShell:
 Esse exemplo preserva os logs. As screenshots sao gravadas na raiz de trabalho `/app`; para preserva-las, use um container sem `--rm`, copie os arquivos com `docker cp` antes de remove-lo e depois execute `docker rm`. Evite montar todo `/app` sobre a imagem, pois isso pode esconder os arquivos do projeto.
   -v "C:\scripts_python\playwright_timer\config.json:/app/config.json:ro" `
   -v "C:\scripts_python\playwright_timer\.env:/app/.env:ro" `
+  -v "C:\scripts_python\playwright_timer\log_playwright:/app/log_playwright" `
   hiannyurt/playwright-webagent:latest
 ```
 
@@ -206,7 +207,7 @@ No Linux:
 docker run --rm -it \
   -v "$PWD/config.json:/app/config.json:ro" \
   -v "$PWD/.env:/app/.env:ro" \
-  hiannyurt/playwright-webagent:1.0.0
+  hiannyurt/playwright-webagent:latest
 ```
 
 ### Por que usar os volumes
