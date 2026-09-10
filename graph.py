@@ -207,7 +207,6 @@ class MicrosoftGraphClient:
                 if elemento_codigo:
                     # Remove qualquer coisa que não seja dígito (limpa o 8774)
                     codigo_acesso = re.sub(r'\D', '', elemento_codigo.text)
-                    print(type)
                     logger.info(f"Código {codigo_acesso} extraído do e-mail: {ultimo_email.get('subject')}")
                     return codigo_acesso
                 else:

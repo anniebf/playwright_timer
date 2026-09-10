@@ -24,10 +24,10 @@ User = "rpa"
 Environment = dados["Environment"]
 Environment = "protheus"
 
-destinatarios = ["WILSON.PALHARES@bomfuturo.com.br", "hianny.urt@bomfuturo.com.br",
-                 "MARCEL.RODRIGUES@bomfuturo.com.br","sherman.vendramini@bomfuturo.com.br"]
+#destinatarios = ["WILSON.PALHARES@bomfuturo.com.br", "hianny.urt@bomfuturo.com.br",
+#                 "MARCEL.RODRIGUES@bomfuturo.com.br","sherman.vendramini@bomfuturo.com.br"]
 
-#destinatarios = ["hianny.urt@bomfuturo.com.br"]
+destinatarios = ["hianny.urt@bomfuturo.com.br"]
 
 def enviar_warning(DESC):
 

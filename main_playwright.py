@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 from socket import timeout
+import subprocess
 import sys
 from pathlib import Path
 from time import monotonic, sleep
@@ -83,28 +84,6 @@ class ProtheusPlaywrightMainFlow:
                     continue
         return None
 
-    
-    #FUNCAO PARA CLICAR NO ELEMENTO
-    '''def _click_element(self, selector: str, timeout: int = 10000) -> None:
-        deadline = monotonic() + timeout / 1000
-        while monotonic() < deadline:
-            for frame in self._frames():
-                candidate = frame.locator(selector).first
-                try:
-                    if candidate.is_visible(timeout=300):
-                        candidate.click()
-                        return
-                except (PlaywrightTimeoutError, PlaywrightError):
-                    continue
-                except Exception as err:
-                    logger.warning("Falha ao interagir com seletor '%s': %s", selector, err)
-                    continue
-            sleep(0.2)
-        
-        err_msg = f"Elemento com seletor {selector!r} não foi encontrado dentro do tempo limite de {timeout}ms"
-        logger.error(err_msg)
-        raise PlaywrightTimeoutError(err_msg)'''
-
     def _click_text(self, text: str, timeout: int = 10000, exact: bool = True) -> None:
         deadline = monotonic() + timeout / 1000
         while monotonic() < deadline:
@@ -165,6 +144,7 @@ class ProtheusPlaywrightMainFlow:
         self.page.goto(url, wait_until="domcontentloaded", timeout=self.timeout * 2)
 
     def selecionar_parametros_iniciais(self) -> None:
+        
         rotina = os.getenv("Setup_rotina") or "SIGAADV"
         ambiente = os.getenv("Setup_ambiente") or CONFIG.get("Environment", "bf")
         sleep(5)
@@ -189,10 +169,47 @@ class ProtheusPlaywrightMainFlow:
             logger.info("Nao apareceu a tela de redimensionamento")
         except Exception as e:
             logger.warning("Falha ao fechar a tela de tamanho: %s", e, exc_info=True)
+    def instalar_e_iniciar_webagent(self):
+        """Instala e executa o WebAgent no SO caso ele ainda não esteja rodando."""
+        caminho_deb = "/tmp/totvs-webagent.deb"
+
+        # 1. Pega a URL do botão sem abrir o fluxo de download do navegador
+        try:
+            url_download = self.page.get_by_role("button", name="INSTALAR PARA LINUX").get_attribute("href")
+        except:
+            pass
+
+        if url_download:
+            # 2. Baixa e instala via terminal do Linux
+            subprocess.run(["wget", "-O", caminho_deb, url_download], check=True)
+            subprocess.run(["sudo", "dpkg", "-i", caminho_deb], check=True)
+
+            # 3. Inicia o serviço do WebAgent em background
+            subprocess.run(["sudo", "systemctl", "start", "totvs-webagent"], check=True)
+
+            # 4. Recarrega a página para o Protheus reconhecer o agente
+            self.page.reload()
 
     def fazer_login(self) -> None:
+                
         username = CONFIG.get("User")
         password = CONFIG.get("Password")
+
+        self.page.screenshot(path="tela_login.png", full_page=True)
+        # Verifica se o WebAgent está bloqueando a tela
+        if self.page.get_by_role("button", name="INSTALAR PARA LINUX").is_visible():
+            logger.info("WebAgent não detectado. Instalando...")
+            self.instalar_e_iniciar_webagent()
+            with self.page.expect_download() as download_info:
+                # 2. Clica no botão para disparar o download
+                self.page.get_by_role("button", name="INSTALAR PARA LINUX").click()
+
+                # 3. Captura o objeto de download concluído
+                download = download_info.value
+
+                # 4. Salva o instalador no disco do servidor Linux
+                caminho_arquivo = "/tmp/totvs-webagent.deb"
+                download.save_as(caminho_arquivo)
         sleep(2) 
         logger.info("Iniciando processo de login para o usuário: %s", username)
         webview = self.page.locator("wa-webview#COMP3010").first
@@ -416,6 +433,7 @@ def exec_playwright_from_main(headless_override: bool | None = None) -> bool:
             try:
                 cronometro.atualizar_acao("ABRINDO NAVEGADOR")
                 browser = browser_type.launch(headless=headless)
+                #browser = playwright.chromium.launch(headless=headless)
                 context: BrowserContext = browser.new_context()
                 page = context.new_page()
                 flow = ProtheusPlaywrightMainFlow(page)
@@ -475,8 +493,9 @@ def exec_playwright_from_main(headless_override: bool | None = None) -> bool:
                 logger.info("Cronometro finalizado em %ss", total)
     except Exception as global_err:
         logger.exception("Erro crítico no gerenciador do Playwright: %s", global_err)
+        enviar_erro_base_selenium()
         return False
-
+    
 
 if __name__ == "__main__":
     try:
