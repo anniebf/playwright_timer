@@ -5,6 +5,7 @@ import json
 from dotenv import load_dotenv
 import glob
 import os
+import re
 from pathlib import Path
 from threading import Event, Lock, Thread
 import time
@@ -15,12 +16,15 @@ logger = logging_config.get_logger('LogBanco')
 
 BASE_DIR = Path(__file__).resolve().parent
 ID_EXEC_PATH = BASE_DIR / 'idExec.json'
-LOG_DIR = BASE_DIR / 'log'
+LOG_DIR = BASE_DIR / 'log_playwright'
 
 def get_latest_log_file(log_folder=None, log_prefix='log'):
     if log_folder is None:
         log_folder = str(LOG_DIR)
-    log_files = glob.glob(os.path.join(log_folder, f'{log_prefix}*.txt'))
+    if Path(log_folder).resolve() == LOG_DIR.resolve():
+        log_files = glob.glob(os.path.join(log_folder, '*.log'))
+    else:
+        log_files = glob.glob(os.path.join(log_folder, f'{log_prefix}*.txt'))
     if not log_files:
         log_files = glob.glob(f'{log_prefix}*.txt')
     log_files.sort(key=os.path.getmtime, reverse=True)
@@ -59,12 +63,17 @@ tempo_executado = 0  # Inicializa a variável
 erro = False
 
 
+def formatar_descricao( nivel: str, mensagem: str) -> str:
+    return f'[{nivel.strip()}] {mensagem.strip()}'
+
+
 class CronometroExecucao:
     """Registra no banco o andamento da execução a cada segundo."""
 
     def __init__(self, acao_inicial: str = 'ABRINDO NAVEGADOR', status_padrao: str = 'OK'):
         self.id_execucao = id_execucao
         self.status_padrao = status_padrao
+        self._status_atual = status_padrao
         self._acao_atual = acao_inicial
         self._inicio_monotonic: float | None = None
         self._stop_event = Event()
@@ -75,8 +84,15 @@ class CronometroExecucao:
         with self._lock:
             self._acao_atual = acao
 
+    def marcar_erro(self) -> None:
+        with self._lock:
+            self._status_atual = 'ERRO'
+
     def _descricao_tick(self, segundos: int, acao: str) -> str:
-        return f'CRONOMETRO [{segundos:04d}s] - {acao}'
+        return formatar_descricao(
+            self._status_atual,
+            f'{segundos:04d}s- {acao}',
+        )
 
     def iniciar(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -86,7 +102,7 @@ class CronometroExecucao:
         self._stop_event.clear()
         registrar_timer(
             self.id_execucao,
-            'INICIO CRONOMETRO PLAYWRIGHT',
+            formatar_descricao( self.status_padrao, 'INICIO CRONOMETRO PLAYWRIGHT'),
             sistema,
             usuario,
             self.status_padrao,
@@ -105,21 +121,24 @@ class CronometroExecucao:
             segundos = int(time.monotonic() - self._inicio_monotonic)
             with self._lock:
                 acao = self._acao_atual
+                status = self._status_atual
 
             registrar_timer(
                 self.id_execucao,
                 self._descricao_tick(segundos, acao),
                 sistema,
                 usuario,
-                self.status_padrao,
+                status,
                 1,
                 datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             )
 
             self._stop_event.wait(1)
 
-    def finalizar(self, status_final: str = 'OK', descricao_final: str = 'FECHANDO NAVEGADOR') -> int:
+    def finalizar(self, status_final: str = 'OK', descricao_final: str = 'FINALIZANDO EXECUCAO') -> int:
         self._stop_event.set()
+        with self._lock:
+            self._status_atual = status_final
         if self._thread is not None:
             self._thread.join(timeout=2)
 
@@ -129,7 +148,7 @@ class CronometroExecucao:
 
         registrar_timer(
             self.id_execucao,
-            descricao_final,
+            formatar_descricao( status_final, descricao_final),
             sistema,
             usuario,
             status_final,
@@ -210,12 +229,9 @@ def inicio():
     
     return data_atual
     
-def finalizarErro(data_atual):
-    
-    print(data_atual)
+def finalizarErro(data_atual: datetime):
     data_finalizacao = datetime.now()
-    print(data_finalizacao)
-    
+
     diferenca = data_finalizacao - data_atual
     tempocorridos = int(diferenca.total_seconds()) 
     
@@ -225,107 +241,43 @@ def finalizarErro(data_atual):
     logger.info('Finalização com erro registrada no banco')
 
 def salvar():
-    logger.info('Registrando processo de log no banco')
-    global erro_tratado_erro, erro_tratado_war, tempo_executado, erro
-    
-    sleep(10)
+    """Grava no banco os registros produzidos pelo logging do Playwright."""
     arquivo_log = get_latest_log_file()
     if not arquivo_log:
-        logger.warning('Nenhum arquivo de log encontrado!')
+        logger.warning('Nenhum arquivo de log do Playwright encontrado em %s', LOG_DIR)
         return
     
-    logger.info(f'Processando arquivo: {arquivo_log}')
-    
-    last_timestamp = None
+    logger.info('Processando arquivo de log do Playwright: %s', arquivo_log)
+    linha_log = re.compile(
+        r'^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - '
+        r'(?P<logger>[^-]+) - (?P<level>INFO|WARNING|ERROR|CRITICAL) - '
+        r'(?P<message>.*)$'
+    )
+
     log_path = Path(arquivo_log)
-    with log_path.open('r', encoding='utf-8') as arquivo:
-        for linha in arquivo:
-            linha = linha.strip()  # Remove espaços e quebras de linha
-            
-            # Processa linhas especiais (Ran/OK) mesmo sem timestamp
-            if linha.startswith("Ran") and " in " in linha:
-                try:
-                    tempo_str = linha.split(" in ")[1].replace("s", "").split(".")[0]
-                    tempo_executado = int(tempo_str)
-                    logger.info(f'Tempo de execução capturado: {tempo_executado}s')
-                    continue
-                except (ValueError, IndexError) as e:
-                    logger.warning(f'Erro ao capturar tempo: {e}')
-                    continue
-            
-            if linha.lower() == "ok":
-                if tempo_executado:
-                    logger.info('Registro final OK gravado no banco')
-                    data_atual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    registrar_timer(
-                        id_execucao,
-                        'FINALIZANDO PROTHEUS_TIR', 
-                        sistema, 
-                        usuario, 
-                        'OK', 
-                        tempo_executado,
-                        data_atual,
-                        
-                    )
-                continue
-            elif "FAILED" in linha:
-                logger.warning('Processo falhou, registrando erro no banco e enviando email')
-                
-                MandaEmail.enviar_warning('Foi Encontrada a linha FAILED no log, a execução nmao foi bem sucedida')
-                data_inicio = inicio()
-                erro = True
-                finalizarErro(data_inicio)
-            
-            # Processa apenas linhas com timestamp
-            if len(linha) < 19:
-                continue
-                
-            timestamp_str = linha[:19]
-            
-            if is_valid_timestamp(timestamp_str):
-                new_timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
-                tempo_execucao = 1  # Valor padrão
-                
-                if last_timestamp:
-                    delta = new_timestamp - last_timestamp
-                    tempo_execucao = delta.total_seconds()
-                
-                last_timestamp = new_timestamp
-            else:
-                timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                tempo_execucao = 1
-            
-            try:
-                if "INFO" in linha:
-                    descricao = linha[29:-1].strip().replace("'", "''")
-                    registrar_timer(id_execucao, descricao, sistema, usuario, 'OK', tempo_execucao, timestamp_str)
-                
-                elif "WARNING:" in linha and not erro_tratado_war:
-                    descricao = linha[34:].strip().replace("'", "''")
-                    registrar_timer(id_execucao, descricao, sistema, usuario, 'WARN', tempo_execucao, timestamp_str)
-                    erro_tratado_war = True
-                    
-            except Exception as e:
-                logger.error(f'Erro ao processar linha: {linha} - Erro: {e}')
-    
-    # Verificação final
-    media_resultado = resultado(id_execucao_atual=id_execucao)
-    if erro:
-        pass
-    else:
-        logger.info('Sem erro fatal, avaliando tempo de execução')
-        if media_resultado and tempo_executado and tempo_executado > media_resultado * 1.3:
-            logger.warning(
-                'Tempo atual acima de 30%% da média: atual=%ss, média=%ss',
-                tempo_executado,
-                round(media_resultado, 2),
-            )
-            MandaEmail.enviar_temp_exc(tempo_executado, media_resultado)
-        else:
-            logger.info('Tempo de execução dentro do esperado')
+    linhas = log_path.read_text(encoding='utf-8').splitlines()
+    for linha in linhas:
+        registro = linha_log.match(linha)
+        if not registro or registro.group('logger').strip() == 'LogBanco':
+            continue
+
+        nivel = registro.group('level')
+        status = 'ERRO' if nivel in {'ERROR', 'CRITICAL'} else 'WARN' if nivel == 'WARNING' else 'OK'
+        descricao = formatar_descricao(
+            status,
+            registro.group('message'),
+        )
+        registrar_timer(
+            id_execucao,
+            descricao,
+            sistema,
+            usuario,
+            status,
+            1,
+            registro.group('timestamp'),
+        )
 
 if __name__ == '__main__':
     inicio()
     salvar()
-    finalizarErro('')
     
