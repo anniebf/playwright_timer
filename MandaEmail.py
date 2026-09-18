@@ -5,6 +5,7 @@ from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 from html import escape
 import os
+import traceback
 from pathlib import Path
 import logging_config
 
@@ -22,7 +23,7 @@ User = dados.get("User", "Não informado")
 Environment = dados.get("Environment", "Não informado")
 
 destinatarios = ["WILSON.PALHARES@bomfuturo.com.br", "hianny.urt@bomfuturo.com.br",
-                 "MARCEL.RODRIGUES@bomfuturo.com.br","sherman.vendramini@bomfuturo.com.br"]
+                "MARCEL.RODRIGUES@bomfuturo.com.br","sherman.vendramini@bomfuturo.com.br"]
 
 #destinatarios = ["hianny.urt@bomfuturo.com.br"]
 
@@ -109,6 +110,52 @@ def enviar_erro():
     except Exception as e:
         logger.error(f'Ocorreu um erro ao enviar email erro: {e}')
     return
+
+
+def enviar_erro_execucao(erro, etapa, detalhes=None):
+    """Envia um alerta detalhado para falhas ocorridas durante o fluxo."""
+    try:
+        server_smtp = os.getenv('server_smtp')
+        port = int(os.getenv('port', '587'))
+        sender_mail = os.getenv('sender_mail')
+        password = os.getenv('password')
+
+        tipo_erro = type(erro).__name__
+        mensagem_erro = escape(' '.join(str(erro).split()))
+        etapa = escape(' '.join(str(etapa).split()))
+        detalhes = detalhes or traceback.format_exc()
+        detalhes = escape('\n'.join(str(detalhes).splitlines()[-12:]))
+
+        subject = "Falha durante a execução do RPA Playwright Timer"
+        body = f"""\
+        <h2>Falha durante a execução do RPA</h2>
+        <p>A base do Protheus foi acessada, mas ocorreu uma falha durante o processamento.</p>
+        <h3>Detalhes da falha</h3>
+        <ul>
+            <li><strong>Etapa atual:</strong> {etapa}</li>
+            <li><strong>Tipo do erro:</strong> {tipo_erro}</li>
+            <li><strong>Mensagem:</strong> {mensagem_erro}</li>
+            <li><strong>Usuário do Protheus:</strong> {escape(str(User))}</li>
+            <li><strong>Ambiente:</strong> {escape(str(Environment))}</li>
+            <li><strong>URL:</strong> {escape(str(url))}</li>
+        </ul>
+        <h3>Detalhes técnicos</h3>
+        <pre>{detalhes}</pre>
+        <p><strong>Ação recomendada:</strong> verificar a etapa informada, o elemento esperado e os logs técnicos antes de executar o RPA novamente.</p>"""
+
+        message = MIMEMultipart()
+        message["From"] = sender_mail
+        message["To"] = ", ".join(destinatarios)
+        message["Subject"] = subject
+        message.attach(MIMEText(body, "html"))
+
+        with smtplib.SMTP(server_smtp, port) as server:
+            server.starttls()
+            server.login(sender_mail, password)
+            server.sendmail(sender_mail, destinatarios, message.as_string())
+        logger.info('Email detalhado de falha de execução enviado com sucesso')
+    except Exception as email_error:
+        logger.error('Ocorreu um erro ao enviar o email detalhado de execução: %s', email_error)
 
 def enviar_temp_exc(tempo_executado, media_resultado):
     try:

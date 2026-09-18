@@ -19,14 +19,14 @@ from playwright.sync_api import (
     sync_playwright,
 )
 
-from MandaEmail import enviar_erro_base_selenium
+from MandaEmail import enviar_erro_base_selenium, enviar_erro_execucao
 import graph
 import LogBanco
 import logging_config
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
-MENU_LATERAL = "Compras > Movimento > Pedidos de Compra"
+#MENU_LATERAL = "Compras > Movimento > Pedidos de Compra"
 
 logger = logging_config.get_logger("main_playwright_from_main")
 
@@ -34,6 +34,8 @@ logger = logging_config.get_logger("main_playwright_from_main")
 try:
     with CONFIG_PATH.open("r", encoding="utf-8") as config_file:
         CONFIG = json.load(config_file)
+        MENU_LATERAL = CONFIG.get("MenuLateral")
+        print(MENU_LATERAL)
 except Exception as e:
     logger.exception("Erro crítico ao carregar arquivo de configuração (%s): %s", CONFIG_PATH, e)
     sys.exit(1)
@@ -63,9 +65,13 @@ def _build_args() -> argparse.Namespace:
 
 
 class ProtheusPlaywrightMainFlow:
-    def __init__(self, page: Page):
+    def __init__(self, page: Page, cronometro: LogBanco.CronometroExecucao):
         self.page = page
+        self.cronometro = cronometro
         self.timeout = int(CONFIG.get("TimeOut", 30)) * 1000
+
+    def _atualizar_acao(self, mensagem: str) -> None:
+        self.cronometro.atualizar_acao(mensagem)
 
     def _frames(self) -> list[Frame]:
         return self.page.frames
@@ -97,7 +103,7 @@ class ProtheusPlaywrightMainFlow:
                 for candidate in candidates:
                     try:
                         element = candidate.first
-                        while element.is_visible(timeout=300):
+                        while element.is_visible(timeout=9000):
                             # Executa o duplo clique diretamente
                             element.dblclick()
                             return
@@ -113,14 +119,17 @@ class ProtheusPlaywrightMainFlow:
         raise PlaywrightTimeoutError(err_msg)
 
     def _fill(self, selectors: list[str], value: str, timeout: int = 10000) -> None:
+        valor_log = "******" if "password" in " ".join(selectors).lower() else value
+        self._atualizar_acao(f"Procurando campo {selectors} para preencher com '{valor_log}'")
         deadline = monotonic() + timeout / 1000
         last_error: Exception | None = None
 
         while monotonic() < deadline:
-            locator = self._first_visible(selectors, timeout=500)
+            locator = self._first_visible(selectors, timeout=5000)
             if locator is not None:
                 try:
-                    locator.fill(value, timeout=1500)
+                    locator.fill(value, timeout=5000)
+                    self._atualizar_acao(f"Campo {selectors} encontrado e preenchido")
                     return
                 except (PlaywrightTimeoutError, PlaywrightError) as error:
                     last_error = error
@@ -147,13 +156,15 @@ class ProtheusPlaywrightMainFlow:
         
         rotina = os.getenv("Setup_rotina") or "SIGAADV"
         ambiente = os.getenv("Setup_ambiente") or CONFIG.get("Environment", "bf")
+        self._atualizar_acao(f"Aguardando tela inicial; rotina='{rotina}', ambiente='{ambiente}'")
         sleep(5)
         self._fill(["wa-combobox#selectStartProg input", "wa-combobox#selectStartProg"], rotina)
         self._fill(["wa-combobox#selectEnv input", "wa-combobox#selectEnv"], ambiente)
 
         botao_ok = self.page.locator("wa-dialog.startParameters wa-button button").last
         try:
-            botao_ok.click(timeout=50000)
+            self._atualizar_acao("Parâmetros iniciais preenchidos; clicando em OK")
+            botao_ok.click(timeout=90000)
             logger.info("Acessou o SIGAADV")
             cronometro.atualizar_acao("Acessou o SIGAADV")
         except PlaywrightTimeoutError:
@@ -165,6 +176,7 @@ class ProtheusPlaywrightMainFlow:
 
     def fechar_tela_tamanho_se_existir(self,cronometro) -> None:
         try:
+            self._atualizar_acao("Verificando se a tela de redimensionamento existe")
             botao_tamanho = self.page.locator("wa-button#COMP3012 button").first
             botao_tamanho.wait_for(state="visible", timeout=8000)
             botao_tamanho.click(timeout=5000)
@@ -219,6 +231,7 @@ class ProtheusPlaywrightMainFlow:
         logger.info("Iniciando processo de login para o usuário: %s", username)
         cronometro.atualizar_acao("Iniciando processo de login para o usuário: {username}".format(username=username))
         webview = self.page.locator("wa-webview#COMP3010").first
+        self._atualizar_acao("Aguardando webview de login 'wa-webview#COMP3010'")
         webview.wait_for(timeout=self.timeout)
         logger.info("Webview de login carregado")
         cronometro.atualizar_acao("Webview de login carregado")
@@ -230,6 +243,7 @@ class ProtheusPlaywrightMainFlow:
             cronometro.atualizar_acao("Erro: Iframe de login nao encontrado")
             raise PlaywrightTimeoutError(err_msg)
 
+        self._atualizar_acao("Iframe de login encontrado; preenchendo usuário")
         login_frame.locator('input[name="login"]').last.fill(username, timeout=200000)
         logger.info("Campo de usuário preenchido")
         cronometro.atualizar_acao("Campo de usuário preenchido")
@@ -237,6 +251,7 @@ class ProtheusPlaywrightMainFlow:
         logger.info("Campo de senha preenchido")
         cronometro.atualizar_acao("Campo de senha preenchido")
         sleep(1)
+        self._atualizar_acao("Usuário e senha preenchidos; clicando em 'Entrar'")
         login_frame.get_by_role("button", name="Entrar", exact=True).click(timeout=200000)
         logger.info("Botão 'Entrar' clicado no formulário de login")
         cronometro.atualizar_acao("Botão 'Entrar' clicado no formulário de login")
@@ -244,7 +259,7 @@ class ProtheusPlaywrightMainFlow:
         cronometro.atualizar_acao("Credenciais preenchidas")
 
         try:
-            self._esperar_e_clicar("Entrar", timeout=200000)
+            self._esperar_e_clicar("Entrar", timeout=500000)
             logger.info("Botao Entrar clicado")
             cronometro.atualizar_acao("Botao Entrar clicado")
         except PlaywrightTimeoutError:
@@ -254,9 +269,10 @@ class ProtheusPlaywrightMainFlow:
             logger.exception("Erro ao confirmar botão 'Entrar': %s", e)
             cronometro.atualizar_acao("Erro ao confirmar botão 'Entrar'")
 
-    def _esperar_e_clicar(self,cronometro, texto_ou_seletor: str, timeout: int = 60000, duplo_clique: bool = False) -> None:
+    def _esperar_e_clicar(self, texto_ou_seletor: str, timeout: int = 90000, duplo_clique: bool = False) -> None:
         logger.info("Aguardando elemento ou seletor: '%s'...", texto_ou_seletor)
-        cronometro.atualizar_acao("Aguardando elemento ou seletor: '%s'..." % texto_ou_seletor)
+        acao = "duplo clique" if duplo_clique else "clique"
+        self._atualizar_acao(f"Procurando '{texto_ou_seletor}' para {acao}; timeout {timeout}ms")
         deadline = monotonic() + (timeout / 1000)
 
         def buscar_em_frame(frame: Frame) -> Locator | None:
@@ -297,14 +313,16 @@ class ProtheusPlaywrightMainFlow:
                 for frame in self.page.frames:
                     target = buscar_em_frame(frame)
                     if target:
-                        target.wait_for(state="visible", timeout=2000)
+                        target.wait_for(state="visible", timeout=9000)
+                        self._atualizar_acao(f"Elemento '{texto_ou_seletor}' encontrado; executando {acao}")
                         
                         if duplo_clique:
-                            target.dblclick(force=True, timeout=3000)
+                            target.dblclick(force=True, timeout=9000)
                         else:
-                            target.click(force=True, timeout=3000)
+                            target.click(force=True, timeout=9000)
                             
                         logger.info("Clique realizado com sucesso no elemento: '%s'", texto_ou_seletor)
+                        self._atualizar_acao(f"{acao.capitalize()} realizado em '{texto_ou_seletor}'")
                         return
             except (PlaywrightTimeoutError, PlaywrightError) as err:
                 logger.debug("Tentando interagir com '%s'... (%s)", texto_ou_seletor, err)
@@ -312,34 +330,10 @@ class ProtheusPlaywrightMainFlow:
             sleep(0.5)
 
         err_msg = f"Elemento '{texto_ou_seletor}' não foi encontrado dentro de {timeout}ms"
+        self._atualizar_acao(f"Falha: elemento '{texto_ou_seletor}' não encontrado após {timeout}ms")
         logger.error(err_msg)
         raise PlaywrightTimeoutError(err_msg)
     
-    def executar_rotina_teste(self,cronometro) -> None:
-        logger.info("Acessando menu lateral: %s", MENU_LATERAL)
-        for etapa in [parte.strip() for parte in MENU_LATERAL.split(">") if parte.strip()]:
-            # No menu lateral do Protheus, usa-se duplo clique em alguns nós da árvore
-            self._esperar_e_clicar(etapa, timeout=30000, duplo_clique=True)
-            cronometro.atualizar_acao(f"Etapa do menu lateral concluída: {etapa}")
-
-        logger.info("Executando rotina de validação")
-        
-        # Aguarda a ação 'Visualizar'
-        self._esperar_e_clicar("Visualizar", timeout=60000, duplo_clique=False)
-        self.page.screenshot(path="Visualizar.png", full_page=True)
-        cronometro.atualizar_acao("Ação 'Clicar em Visualizar' concluída")
-
-
-        # Aguarda a ação 'Cancelar' no modal/tela aberta
-        self._esperar_e_clicar("Cancelar", timeout=100000, duplo_clique=False)
-        self.page.screenshot(path="Cancelar.png", full_page=True)
-        cronometro.atualizar_acao("Ação 'Clicar em Cancelar' concluída")
-
-        # Para fechar/sair usando ID específico
-        self._esperar_e_clicar("#COMP6014", timeout=90000)
-        self.page.screenshot(path="sair.png", full_page=True)
-        cronometro.atualizar_acao("Ação 'Clicar em Sair' concluída")
-
     def preencher_empresa_filial(self,cronometro) -> None:
         emp = os.getenv("Setup_emp")
         if not emp:
@@ -354,9 +348,9 @@ class ProtheusPlaywrightMainFlow:
                     'input[placeholder*="Grupo"]',
                 ],
                 emp,
-                timeout=10000,
+                timeout=50000,
             )
-            self._esperar_e_clicar("Entrar", timeout=10000)
+            self._esperar_e_clicar("Entrar", timeout=50000)
             logger.info("Empresa preenchida")
             cronometro.atualizar_acao("Empresa preenchida")
         except PlaywrightTimeoutError:
@@ -366,9 +360,10 @@ class ProtheusPlaywrightMainFlow:
             logger.exception("Erro durante o preenchimento da empresa/filial: %s", e)
             cronometro.atualizar_acao("Erro durante o preenchimento da empresa/filial")
 
-    def confirmar_mfa(self,cronometro, wait_ms: int = 5000) -> bool:
+    def confirmar_mfa(self,cronometro, wait_ms: int = 9000) -> bool:
         campo_mfa = self.page.locator("wa-text-input#COMP4506 input").first
         try:
+            self._atualizar_acao(f"Verificando campo MFA 'COMP4506'; aguardando até {wait_ms}ms")
             campo_mfa.wait_for(state="visible", timeout=wait_ms)
         except PlaywrightTimeoutError:
             cronometro.atualizar_acao("Campo MFA nao apareceu")
@@ -381,8 +376,10 @@ class ProtheusPlaywrightMainFlow:
                 cronometro.atualizar_acao("Codigo de MFA retornado está vazio ou inválido")
                 return False
 
-            campo_mfa.fill(codigo, timeout=5000)
-            self.page.locator("wa-button#COMP4507 button").first.click(timeout=5000)
+            self._atualizar_acao("Código MFA encontrado; preenchendo campo de autenticação")
+            campo_mfa.fill(codigo, timeout=9000)
+            self._atualizar_acao("Código MFA preenchido; clicando em confirmar")
+            self.page.locator("wa-button#COMP4507 button").first.click(timeout=9000)
             logger.info("MFA confirmado com sucesso")
             cronometro.atualizar_acao("MFA confirmado com sucesso")
             return True
@@ -391,7 +388,7 @@ class ProtheusPlaywrightMainFlow:
             cronometro.atualizar_acao("Nao foi possivel confirmar MFA devido a um erro inesperado")
             return False
 
-    def confirmar_mfa_se_existir(self,cronometro, etapa: str, wait_ms: int = 2500) -> bool:
+    def confirmar_mfa_se_existir(self,cronometro, etapa: str, wait_ms: int = 9000) -> bool:
         confirmado = self.confirmar_mfa(cronometro, wait_ms=wait_ms)
         if confirmado:
             logger.info("MFA confirmado %s", etapa)
@@ -405,7 +402,7 @@ class ProtheusPlaywrightMainFlow:
         logger.info("Acessando menu lateral: %s", MENU_LATERAL)
         cronometro.atualizar_acao("Acessando menu lateral: %s" % MENU_LATERAL)
         for etapa in [parte.strip() for parte in MENU_LATERAL.split(">") if parte.strip()]:
-            self._esperar_e_clicar(etapa, timeout=30000)
+            self._esperar_e_clicar(etapa, timeout=90000)
 
         logger.info("Executando rotina de validacao")
         cronometro.atualizar_acao("Executando rotina de validacao")
@@ -415,13 +412,13 @@ class ProtheusPlaywrightMainFlow:
             try:
                 logger.info("Tentativa %d de %d: Clicando em 'Visualizar'", tentativa, max_retries)
                 cronometro.atualizar_acao("Tentativa %d de %d: Clicando em 'Visualizar'" % (tentativa, max_retries))
-                self._esperar_e_clicar("Visualizar", timeout=30000)
+                self._esperar_e_clicar("Visualizar", timeout=90000)
                 self.page.screenshot(path=f"Visualizar_tentativa_{tentativa}.png", full_page=True)
                 cronometro.atualizar_acao("Ação 'Clicar em Visualizar' concluída na tentativa %d" % tentativa)
 
                 logger.info("Aguardando botão 'Cancelar'...")
                 # Reduzimos levemente o timeout para detectar a falha mais rápido e tentar de novo
-                self._esperar_e_clicar("Cancelar", timeout=20000) 
+                self._esperar_e_clicar("Cancelar", timeout=90000) 
                 cronometro.atualizar_acao("Ação 'Clicar em Cancelar' concluída na tentativa %d" % tentativa)
 
                 self.page.screenshot(path="Cancelar.png", full_page=True)
@@ -446,7 +443,7 @@ class ProtheusPlaywrightMainFlow:
 
         # Para fechar/sair após o sucesso do fluxo
         try:
-            self._esperar_e_clicar("wa-button#COMP6014 button", timeout=30000)
+            self._esperar_e_clicar("wa-button#COMP6014 button", timeout=90000)
             self.page.screenshot(path="sair.png", full_page=True)
             cronometro.atualizar_acao("Clicando no botão de fechar/sair (#COMP6014)")
         except Exception as e:
@@ -456,10 +453,10 @@ class ProtheusPlaywrightMainFlow:
 
 def exec_playwright_from_main(headless_override: bool | None = None) -> bool:
     mfa_obtido = False
-    cronometro = LogBanco.CronometroExecucao(acao_inicial="PREPARANDO ABERTURA DO NAVEGADOR")
+    cronometro = LogBanco.CronometroExecucao(acao_inicial="INICIANDO EXECUCAO PLAYWRIGHT")
     cronometro.iniciar()
-    status_final = "OK"
-    descricao_final = "FECHANDO NAVEGADOR"
+    status_final = "NAO"
+    descricao_final = "FINALIZANDO EXECUCAO"
 
     try:
         with sync_playwright() as playwright:
@@ -477,7 +474,7 @@ def exec_playwright_from_main(headless_override: bool | None = None) -> bool:
 
             browser: Browser | None = None
             try:
-                cronometro.atualizar_acao("ABRINDO NAVEGADOR")
+                cronometro.atualizar_acao("Abrindo navegador")
                 browser = browser_type.launch(
                     headless=headless,
                     firefox_user_prefs=firefox_prefs,
@@ -485,9 +482,9 @@ def exec_playwright_from_main(headless_override: bool | None = None) -> bool:
                 #browser = playwright.chromium.launch(headless=headless)
                 context: BrowserContext = browser.new_context()
                 page = context.new_page()
-                flow = ProtheusPlaywrightMainFlow(page)
+                flow = ProtheusPlaywrightMainFlow(page, cronometro)
 
-                cronometro.atualizar_acao("ACESSANDO URL DO PROTHEUS")
+                cronometro.atualizar_acao("Acessando URL do Protheus")
                 try:
                     flow.abrir()
                 except PlaywrightTimeoutError as error:
@@ -538,7 +535,7 @@ def exec_playwright_from_main(headless_override: bool | None = None) -> bool:
                 cronometro.atualizar_acao("Execução do fluxo principal do Playwright concluida")
                 return mfa_obtido
             except Exception as e:
-                status_final = "ERRO"
+                status_final = "SIM"
                 erro_resumido = " ".join(str(e).split())
                 descricao_final = f"ERRO DURANTE EXECUCAO PLAYWRIGHT: {erro_resumido}"
                 logger.exception("Exceção não tratada capturada na execução do fluxo principal: %s", e)
@@ -555,7 +552,10 @@ def exec_playwright_from_main(headless_override: bool | None = None) -> bool:
                 LogBanco.salvar()
     except Exception as global_err:
         logger.exception("Erro crítico no gerenciador do Playwright: %s", global_err)
-        enviar_erro_base_selenium()
+        enviar_erro_execucao(
+            global_err,
+            cronometro.obter_acao(),
+        )
         return False
     
 

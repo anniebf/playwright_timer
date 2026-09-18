@@ -26,7 +26,7 @@ import logging_config
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
-MENU_LATERAL = "Compras > Movimento > Pedidos de Compra"
+#MENU_LATERAL = "Compras > Movimento > Pedidos de Compra"
 
 logger = logging_config.get_logger("main_playwright_from_main")
 
@@ -34,6 +34,8 @@ logger = logging_config.get_logger("main_playwright_from_main")
 try:
     with CONFIG_PATH.open("r", encoding="utf-8") as config_file:
         CONFIG = json.load(config_file)
+        MENU_LATERAL = CONFIG.get("MenuLateral")
+        print(MENU_LATERAL)
 except Exception as e:
     logger.exception("Erro crítico ao carregar arquivo de configuração (%s): %s", CONFIG_PATH, e)
     sys.exit(1)

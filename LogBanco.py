@@ -33,7 +33,7 @@ def get_latest_log_file(log_folder=None, log_prefix='log'):
 load_dotenv(BASE_DIR / '.env')
 username = os.getenv('usernamedb')
 password = os.getenv('passworddb')
-dsn = os.getenv('dsnhomol')
+dsn = os.getenv('dsn')
 usuario = os.getenv('usuario')
 
 
@@ -52,9 +52,7 @@ def _next_execution_id() -> int:
 
     return id_atual
 
-
 id_execucao = _next_execution_id()
-    
     
 sistema = 'PROTHEUS'
 erro_tratado_erro = False
@@ -63,14 +61,22 @@ tempo_executado = 0  # Inicializa a variável
 erro = False
 
 
-def formatar_descricao( nivel: str, mensagem: str) -> str:
-    return f'[{nivel.strip()}] {mensagem.strip()}'
+def formatar_descricao(nivel: str, mensagem: str, segundos: int | None = None) -> str:
+    mensagem = ' '.join(mensagem.split())
+    mensagens_padrao = {
+        'INICIO CRONOMETRO PLAYWRIGHT': 'Início do cronômetro Playwright',
+        'FECHANDO NAVEGADOR': 'Fechando navegador',
+        'FINALIZANDO EXECUCAO': 'Finalizando execução',
+    }
+    mensagem = mensagens_padrao.get(mensagem, mensagem)
+    prefixo_tempo = f'[{segundos:04d}s]' if segundos is not None else ''
+    return f'{prefixo_tempo} - {mensagem}'
 
 
 class CronometroExecucao:
     """Registra no banco o andamento da execução a cada segundo."""
 
-    def __init__(self, acao_inicial: str = 'ABRINDO NAVEGADOR', status_padrao: str = 'OK'):
+    def __init__(self, acao_inicial: str = 'ABRINDO NAVEGADOR', status_padrao: str = 'NAO'):
         self.id_execucao = id_execucao
         self.status_padrao = status_padrao
         self._status_atual = status_padrao
@@ -84,6 +90,10 @@ class CronometroExecucao:
         with self._lock:
             self._acao_atual = acao
 
+    def obter_acao(self) -> str:
+        with self._lock:
+            return self._acao_atual
+
     def marcar_erro(self) -> None:
         with self._lock:
             self._status_atual = 'ERRO'
@@ -91,7 +101,8 @@ class CronometroExecucao:
     def _descricao_tick(self, segundos: int, acao: str) -> str:
         return formatar_descricao(
             self._status_atual,
-            f'{segundos:04d}s- {acao}',
+            acao,
+            segundos,
         )
 
     def iniciar(self) -> None:
@@ -102,7 +113,7 @@ class CronometroExecucao:
         self._stop_event.clear()
         registrar_timer(
             self.id_execucao,
-            formatar_descricao( self.status_padrao, 'INICIO CRONOMETRO PLAYWRIGHT'),
+            formatar_descricao(self.status_padrao, 'INICIO CRONOMETRO PLAYWRIGHT', 0),
             sistema,
             usuario,
             self.status_padrao,
@@ -135,7 +146,7 @@ class CronometroExecucao:
 
             self._stop_event.wait(1)
 
-    def finalizar(self, status_final: str = 'OK', descricao_final: str = 'FINALIZANDO EXECUCAO') -> int:
+    def finalizar(self, status_final: str = 'NAO', descricao_final: str = 'FINALIZANDO EXECUCAO') -> int:
         self._stop_event.set()
         with self._lock:
             self._status_atual = status_final
@@ -148,7 +159,7 @@ class CronometroExecucao:
 
         registrar_timer(
             self.id_execucao,
-            formatar_descricao( status_final, descricao_final),
+            formatar_descricao(status_final, descricao_final, total),
             sistema,
             usuario,
             status_final,
@@ -182,7 +193,7 @@ def resultado(id_execucao_atual: int | None = None):
                 SELECT TEMPO_EXECUCAO
                 FROM RPA.TIMER
                 WHERE DESCRICAO = 'FINALIZANDO PROTHEUS_TIR'
-                  AND ERRO = 'OK'
+                  AND ERRO = 'NAO'
                   {filtro_execucao_atual}
                 ORDER BY HORARIO_EXECUCAO DESC, ID_EXECUCAO DESC
                 FETCH FIRST 10 ROWS ONLY
@@ -225,7 +236,7 @@ def inicio():
     data_atual = datetime.now() 
     data_inicio = data_atual.strftime('%Y-%m-%d %H:%M:%S')
     
-    registrar_timer(id_execucao, 'INICIANDO PROTHEUS_TIR', sistema, usuario, 'OK', 0, data_inicio)
+    registrar_timer(id_execucao, 'INICIANDO PROTHEUS_TIR', sistema, usuario, 'NAO', 0, data_inicio)
     
     return data_atual
     
@@ -256,16 +267,22 @@ def salvar():
 
     log_path = Path(arquivo_log)
     linhas = log_path.read_text(encoding='utf-8').splitlines()
+    primeiro_timestamp = None
     for linha in linhas:
         registro = linha_log.match(linha)
         if not registro or registro.group('logger').strip() == 'LogBanco':
             continue
 
+        timestamp = datetime.strptime(registro.group('timestamp'), '%Y-%m-%d %H:%M:%S')
+        if primeiro_timestamp is None:
+            primeiro_timestamp = timestamp
+        segundos = max(0, int((timestamp - primeiro_timestamp).total_seconds()))
         nivel = registro.group('level')
         status = 'ERRO' if nivel in {'ERROR', 'CRITICAL'} else 'WARN' if nivel == 'WARNING' else 'OK'
         descricao = formatar_descricao(
             status,
             registro.group('message'),
+            segundos,
         )
         registrar_timer(
             id_execucao,
