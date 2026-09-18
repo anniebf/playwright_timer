@@ -296,7 +296,8 @@ sair.png
 Como o container e removido com `--rm`, esses arquivos desaparecem ao final se nao forem montados em um diretorio do host. Para preserva-los:
 
 ```powershell
-docker run --rm -it `
+docker run --rm -it TZ=America/Cuiaba `
+  -v "/etc/localtime:/etc/localtime:ro" `
   -v "C:\scripts_python\playwright_timer\config.json:/app/config.json:ro" `
   -v "C:\scripts_python\playwright_timer\.env:/app/.env:ro" `
   -v "C:\scripts_python\playwright_timer\saida:/app/log_playwright" `
