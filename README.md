@@ -4,6 +4,24 @@ Imagem Docker para executar uma automacao Playwright no Protheus, usando o TOTVS
 
 O container foi desenhado para executar **uma rotina por inicializacao**. Quando o script termina, o Supervisor encerra o WebAgent e o container tambem termina.
 
+# COMANDOS PRINCIPAIS 
+
+# Rodar docker no linux
+1. docker run --pull always --rm -it   -e TZ=America/Cuiaba   -v /etc/localtime:/etc/localtime:ro   -v /python_bf/playwright_timer/config.json:/app/config.json:ro   -v /python_bf/playwright_timer/.env:/app/.env:ro   -v /python_bf/playwright_timer/idExec.json:/app/idExec.json   -v /python_bf/playwright_timer/log_playwright:/app/log_playwright   hiannyurt/playwright-webagent:latest
+
+# Buildar a imagem na maquina 
+2. docker build --no-cache -t hiannyurt/playwright-webagent:latest .
+
+# Publicar imagem
+3. docker push hiannyurt/playwright-webagent:latest
+
+# Importar imagem no servidor 
+4. docker pull hiannyurt/playwright-webagent:latest
+
+# ⚠️QUANDO FOR ATUALIZAR O WEBAGENT⚠️
+Quando for atualizar oo webagent coloque os arquivos .deb e .rpm na pasta webagent e faca o docker build da imagem com a nova versao do webagent
+
+
 ## 1. O que a imagem faz
 
 Ao iniciar, o container:
@@ -190,7 +208,7 @@ O build instala:
 
 O arquivo `.dockerignore` impede que `config.json` e `.env` sejam enviados para o contexto do build.
 
-## 7. Executar a imagem
+## 7. Executar a imagezm
 No Windows PowerShell:
 
 ```powershell
@@ -204,10 +222,7 @@ Esse exemplo preserva os logs. As screenshots sao gravadas na raiz de trabalho `
 No Linux:
 
 ```bash
-docker run --rm -it \
-  -v "$PWD/config.json:/app/config.json:ro" \
-  -v "$PWD/.env:/app/.env:ro" \
-  hiannyurt/playwright-webagent:latest
+docker run --pull always --rm -it  -e TZ=America/Cuiaba   -v /etc/localtime:/etc/localtime:ro   -v /python_bf/playwright_timer/config.json:/app/config.json:ro   -v /python_bf/playwright_timer/.env:/app/.env:ro   -v /python_bf/playwright_timer/idExec.json:/app/idExec.json   -v /python_bf/playwright_timer/log_playwright:/app/log_playwright   hiannyurt/playwright-webagent:teste
 ```
 
 ### Por que usar os volumes
