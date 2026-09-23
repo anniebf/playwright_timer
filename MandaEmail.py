@@ -23,7 +23,7 @@ User = dados.get("User", "Não informado")
 Environment = dados.get("Environment", "Não informado")
 
 destinatarios = ["WILSON.PALHARES@bomfuturo.com.br", "hianny.urt@bomfuturo.com.br",
-                "MARCEL.RODRIGUES@bomfuturo.com.br","sherman.vendramini@bomfuturo.com.br"]
+                "felipe.assis@bomfuturo.com.br","MARCEL.RODRIGUES@bomfuturo.com.br","sherman.vendramini@bomfuturo.com.br"]
 
 #destinatarios = ["hianny.urt@bomfuturo.com.br"]
 

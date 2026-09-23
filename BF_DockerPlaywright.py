@@ -39,7 +39,7 @@ def playwright():
         task_id="executar_docker_playwright",
         python=PATH_TO_PYTHON_BINARY
     )
-    def call_job_energisa(diretorio_script_path: str):
+    def call_job_playwright(diretorio_script_path: str):
         
         import sys
         import os # Importamos 'os' para manipulação do sistema de arquivos
@@ -60,8 +60,8 @@ def playwright():
         run_container()
 
     # Passa o caminho do diretório como argumento para a função da task
-    task_energisa = call_job_energisa(diretorio_script_path=DIRETORIO_DO_SCRIPT)
+    task_docker = call_job_playwright(diretorio_script_path=DIRETORIO_DO_SCRIPT)
 
-    inicio >> task_energisa >> fim
+    inicio >> task_docker >> fim
     
 playwright()
