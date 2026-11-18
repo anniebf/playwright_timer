@@ -15,6 +15,7 @@ LÓGICA GERAL
    - o log (resumo no final);
    - a tabela RPA.TIMER (cada rotina com seu próprio ID_EXECUCAO);
    - log_playwright/tempos_rotinas_<id>.json.
+   Cada rotina também tem um log só dela em log_playwright/rotinas/.
 5. Falhas continuam com o comportamento antigo, agora POR ROTINA: novas tentativas
    (ExecutionRetries) e e-mail de erro. Uma rotina com falha não para as outras.
 """
@@ -1182,6 +1183,28 @@ def executar_rotina_isolada(
         return ResultadoRotina(rotina.nome, rotina.caminho, 0.0, False, erro_resumido)
 
 
+# ponto de entrada de cada thread: abre o log exclusivo da rotina e executa a rotina
+def _executar_rotina_com_log(
+    rotina: Rotina,
+    indice_rotina: int,
+    total_rotinas: int,
+    headless_override: bool | None = None,
+) -> ResultadoRotina:
+    # O ID é gerado aqui para já aparecer no nome do arquivo de log;
+    # as novas tentativas rodam na mesma thread e caem no mesmo arquivo.
+    id_execucao = LogBanco.nova_execucao_id()
+    handler = logging_config.iniciar_log_da_rotina(indice_rotina, id_execucao, rotina.nome)
+    logger.info("Log da rotina '%s' em %s", rotina.nome, handler.baseFilename)
+    try:
+        return executar_rotina_isolada(
+            rotina, indice_rotina, total_rotinas,
+            headless_override=headless_override,
+            _id_execucao=id_execucao,
+        )
+    finally:
+        logging_config.encerrar_log_da_rotina(handler)
+
+
 #########################################################################################################
 #
 # Função principal: distribui as rotinas em threads e consolida os tempos no final.
@@ -1203,7 +1226,7 @@ def exec_playwright_from_main(
     resultados: list[ResultadoRotina | None] = [None] * total
     with ThreadPoolExecutor(max_workers=max_threads, thread_name_prefix="rotina") as executor:
         futuros = {
-            executor.submit(executar_rotina_isolada, rotina, indice, total, headless_override): indice - 1
+            executor.submit(_executar_rotina_com_log, rotina, indice, total, headless_override): indice - 1
             for indice, rotina in enumerate(lista_rotinas, start=1)
         }
         for futuro in as_completed(futuros):

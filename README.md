@@ -148,6 +148,7 @@ Cada rotina roda em uma **sessao propria e em thread separada**: abre o navegado
 
 - Login + MFA + empresa/filial sao feitos **em fila** entre as threads (um por vez), e o codigo MFA so e aceito se o e-mail chegou depois do clique em "Entrar" daquela sessao. As rotinas em si rodam em paralelo.
 - O tempo de cada rotina mede so os cliques do caminho (sem login) e sai em: log final (`Resumo dos tempos por rotina`), `RPA.TIMER` (cada rotina com seu proprio `ID_EXECUCAO`) e `log_playwright/tempos_rotinas_<id>.json`. O "Total das rotinas" e a soma dos tempos, nao o tempo de relogio.
+- Logs: `log_playwright/*.log` continua com tudo (e e o que vai para o banco); cada rotina tem tambem um arquivo so dela em `log_playwright/rotinas/<data>_r<NN>_<id_execucao>_<nome>.log`.
 - Falha em uma rotina nao para as outras; as novas tentativas (`ExecutionRetries`) e o e-mail de erro valem por rotina.
 - Atencao: o mesmo usuario do Protheus abre varias sessoes ao mesmo tempo (licencas) e todas usam o mesmo WebAgent; comece com `MaxThreads` = 2.
 
