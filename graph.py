@@ -163,12 +163,21 @@ class MicrosoftGraphClient:
         except Exception as e:
             logger.exception("Erro ao filtrar e-mails recentes")        
             
-    def obter_ultimo_codigo_acesso(self):
+    def obter_ultimo_codigo_acesso(self, recebido_apos: datetime | None = None):
+        """Retorna o código do e-mail MFA mais recente.
+
+        recebido_apos: se informado, só considera e-mails recebidos a partir desse
+        horário (o clique em 'Entrar' da sessão). Evita usar um código antigo ou de
+        outra sessão rodando em paralelo. Sem ele, mantém a janela de 5 minutos.
+        """
         if not self.token and not self.obter_token():
             return None
 
-        # 1. Definir o tempo (5 minutos atrás em UTC)
-        cinco_minutos_atras = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+        # 1. Definir o tempo inicial do filtro (em UTC)
+        if recebido_apos is not None:
+            cinco_minutos_atras = recebido_apos.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            cinco_minutos_atras = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
 
         # 2. Construir a URL com Filtro, Ordenação e Top 1
         # Filtramos pela data, ordenamos pela data descrescente e pegamos o primeiro (top=1)
@@ -191,7 +200,7 @@ class MicrosoftGraphClient:
                 dados = response.json().get('value', [])
                 
                 if not dados:
-                    logger.info("Nenhum e-mail encontrado nos últimos 5 minutos.")
+                    logger.info("Nenhum e-mail de MFA encontrado a partir de %s.", cinco_minutos_atras)
                     return None
 
                 # Como usamos $top=1, pegamos o primeiro item da lista

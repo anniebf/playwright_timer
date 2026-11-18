@@ -37,20 +37,31 @@ dsn = os.getenv('dsn')
 usuario = os.getenv('usuario')
 
 
+# Protege a leitura/gravação do idExec.json: com threads, duas rotinas poderiam
+# ler o mesmo número antes de uma delas gravar o próximo.
+_id_lock = Lock()
+
+
 def _next_execution_id() -> int:
-    if not ID_EXEC_PATH.exists():
-        ID_EXEC_PATH.write_text('{"id_execucao": 1}', encoding='utf-8')
+    with _id_lock:
+        if not ID_EXEC_PATH.exists():
+            ID_EXEC_PATH.write_text('{"id_execucao": 1}', encoding='utf-8')
 
-    with ID_EXEC_PATH.open('r', encoding='utf-8') as fileid:
-        dadosid = json.load(fileid)
+        with ID_EXEC_PATH.open('r', encoding='utf-8') as fileid:
+            dadosid = json.load(fileid)
 
-    id_atual = int(dadosid.get('id_execucao', 1))
-    dadosid['id_execucao'] = id_atual + 1
+        id_atual = int(dadosid.get('id_execucao', 1))
+        dadosid['id_execucao'] = id_atual + 1
 
-    with ID_EXEC_PATH.open('w', encoding='utf-8') as fileid:
-        json.dump(dadosid, fileid, indent=4)
+        with ID_EXEC_PATH.open('w', encoding='utf-8') as fileid:
+            json.dump(dadosid, fileid, indent=4)
 
-    return id_atual
+        return id_atual
+
+
+def nova_execucao_id() -> int:
+    """Gera um novo ID_EXECUCAO (thread-safe) para cada rotina executada em paralelo."""
+    return _next_execution_id()
 
 id_execucao = _next_execution_id()
     
@@ -76,8 +87,9 @@ def formatar_descricao(nivel: str, mensagem: str, segundos: int | None = None) -
 class CronometroExecucao:
     """Registra no banco o andamento da execução a cada segundo."""
 
-    def __init__(self, acao_inicial: str = 'ABRINDO NAVEGADOR', status_padrao: str = 'NAO'):
-        self.id_execucao = id_execucao
+    def __init__(self, acao_inicial: str = 'ABRINDO NAVEGADOR', status_padrao: str = 'NAO', id_exec: int | None = None):
+        # Sem id_exec usa o ID global do módulo (comportamento antigo); com threads, cada rotina passa o seu.
+        self.id_execucao = id_exec if id_exec is not None else id_execucao
         self.status_padrao = status_padrao
         self._status_atual = status_padrao
         self._acao_atual = acao_inicial
