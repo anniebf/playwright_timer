@@ -157,6 +157,43 @@ def enviar_erro_execucao(erro, etapa, detalhes=None):
     except Exception as email_error:
         logger.error('Ocorreu um erro ao enviar o email detalhado de execução: %s', email_error)
 
+def enviar_erro_licenca(rotina, etapa):
+    """Alerta específico: o Protheus recusou a sessão com 'Excedeu numero de licenças'."""
+    try:
+        server_smtp = os.getenv('server_smtp')
+        port = int(os.getenv('port', '587'))
+        sender_mail = os.getenv('sender_mail')
+        password = os.getenv('password')
+
+        subject = "Licenças do Protheus esgotadas - RPA Playwright Timer"
+        body = f"""\
+        <h2>Licenças do Protheus esgotadas</h2>
+        <p>O Protheus exibiu a mensagem <strong>"Excedeu numero de licenças"</strong> e recusou a sessão do RPA.
+        A rotina abaixo não foi cronometrada.</p>
+        <ul>
+            <li><strong>Rotina:</strong> {escape(str(rotina))}</li>
+            <li><strong>Última etapa:</strong> {escape(' '.join(str(etapa).split()))}</li>
+            <li><strong>Usuário do Protheus:</strong> {escape(str(User))}</li>
+            <li><strong>Ambiente:</strong> {escape(str(Environment))}</li>
+            <li><strong>URL:</strong> {escape(str(url))}</li>
+        </ul>
+        <p><strong>Ação recomendada:</strong> verificar o consumo de licenças no License Server/Monitor do Protheus
+        e sessões presas do usuário do RPA antes de executar novamente.</p>"""
+
+        message = MIMEMultipart()
+        message["From"] = sender_mail
+        message["To"] = ", ".join(destinatarioAnnie)
+        message["Subject"] = subject
+        message.attach(MIMEText(body, "html"))
+
+        with smtplib.SMTP(server_smtp, port) as server:
+            server.starttls()
+            server.login(sender_mail, password)
+            server.sendmail(sender_mail, destinatarioAnnie, message.as_string())
+        logger.info('Email de licenças excedidas enviado com sucesso')
+    except Exception as email_error:
+        logger.error('Ocorreu um erro ao enviar o email de licenças excedidas: %s', email_error)
+
 def enviar_temp_exc(tempo_executado, media_resultado):
     try:
         server_smtp = os.getenv('server_smtp')

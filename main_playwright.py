@@ -5,19 +5,19 @@ LÓGICA GERAL
 ------------
 1. Lê as rotinas (uma ou mais) de --fluxo ou de "Rotinas"/"Fluxo" no config.json
    (ver rotinas.py). Trocar rotinas não exige alterar código.
-2. Cada rotina roda em uma SESSÃO PRÓPRIA (navegador novo, login, MFA,
-   empresa/filial, caminho da rotina, fecha navegador), dentro de uma THREAD.
-   No máximo "MaxThreads" (config.json, padrão 3) rotinas rodam ao mesmo tempo.
-3. Login + MFA + empresa/filial são feitos em fila (MFA_LOCK): o código MFA
-   chega por e-mail e, em paralelo, uma thread poderia ler o código da outra.
-   Além disso, só é aceito o e-mail recebido DEPOIS do clique em "Entrar".
+2. As rotinas rodam UMA DE CADA VEZ, e cada uma em uma SESSÃO NOVA: abre o
+   navegador, faz login, MFA e empresa/filial, executa o caminho e fecha o navegador.
+3. O código MFA só é aceito se o e-mail chegou DEPOIS do clique em "Entrar" da
+   sessão atual (evita reutilizar o código do login da rotina anterior).
 4. O tempo de cada rotina mede só os cliques do caminho (sem login). Ele vai para:
-   - o log (resumo no final);
+   - o log geral (resumo no final) e um log só da rotina em log_playwright/rotinas/;
    - a tabela RPA.TIMER (cada rotina com seu próprio ID_EXECUCAO);
    - log_playwright/tempos_rotinas_<id>.json.
-   Cada rotina também tem um log só dela em log_playwright/rotinas/.
-5. Falhas continuam com o comportamento antigo, agora POR ROTINA: novas tentativas
-   (ExecutionRetries) e e-mail de erro. Uma rotina com falha não para as outras.
+5. Falhas, por rotina: novas tentativas (ExecutionRetries) e e-mail de erro; uma
+   rotina com falha não impede as próximas.
+6. Erro conhecido "Excedeu numero de licenças" (janela TOTVS): é reconhecido na tela,
+   vira LicencaExcedidaError (erros_protheus.py), tem descrição e e-mail próprios e
+   NÃO entra nas novas tentativas.
 """
 import argparse
 import json
@@ -25,8 +25,6 @@ import os
 import re
 from socket import timeout
 import subprocess
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import sys
 from pathlib import Path
@@ -44,7 +42,8 @@ from playwright.sync_api import (
     sync_playwright,
 )
 
-from MandaEmail import enviar_erro_base_selenium, enviar_erro_execucao, enviar_temp_exc
+from MandaEmail import enviar_erro_base_selenium, enviar_erro_execucao, enviar_erro_licenca, enviar_temp_exc
+from erros_protheus import DESCRICAO_LICENCA, LicencaExcedidaError, LICENCA_REGEX
 import graph
 import LogBanco
 import logging_config
@@ -55,12 +54,9 @@ BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
 
 logger = logging_config.get_logger("main_playwright_from_main")
-BUILD_VERSION = "2026-11-18-rotinas-threads"
-
-# Fila do login/MFA entre as threads: só uma sessão por vez faz login + MFA +
-# empresa/filial. Sem isso, duas sessões pedem código ao mesmo tempo e uma pode
-# preencher o código que pertence à outra.
-MFA_LOCK = threading.Lock()
+BUILD_VERSION = "2026-11-18-rotinas-sequenciais"
+# Intervalo (s) entre verificações da janela de licença enquanto espera um elemento.
+INTERVALO_VERIFICACAO_LICENCA = 3
 
 # Carrega o arquivo JSON com log de falha caso ocorra erro na leitura
 try:
@@ -114,6 +110,27 @@ class ProtheusPlaywrightMainFlow:
     # função para atualizar a ação no cronometro
     def _atualizar_acao(self, mensagem: str) -> None:
         self.cronometro.atualizar_acao(mensagem)
+
+    # verifica se a janela TOTVS "Excedeu numero de licenças" está na tela
+    def verificar_licenca(self) -> None:
+        """Levanta LicencaExcedidaError se a mensagem de licenças estiver visível em algum frame."""
+        for frame in list(self.page.frames):
+            try:
+                mensagem = frame.get_by_text(LICENCA_REGEX).first
+                if mensagem.count() and mensagem.is_visible():
+                    logger.error("Protheus recusou a sessão: Excedeu numero de licenças")
+                    self._atualizar_acao("Janela TOTVS: Excedeu numero de licenças")
+                    try:
+                        self.page.screenshot(
+                            path=str(LogBanco.LOG_DIR / f"licenca_excedida_{int(monotonic() * 1000)}.png"),
+                            full_page=True,
+                        )
+                    except PlaywrightError:
+                        pass
+                    raise LicencaExcedidaError()
+            except PlaywrightError:
+                # frame descarregado no meio da verificação: segue para o próximo
+                continue
 
     # função para obter todos os frames da página
     def _frames(self) -> list[Frame]:
@@ -446,7 +463,12 @@ class ProtheusPlaywrightMainFlow:
 
             return None
         # Loop principal para aguardar e clicar no elemento encontrado
+        proxima_verificacao_licenca = monotonic()
         while monotonic() < deadline:
+            # Se o Protheus mostrar "Excedeu numero de licenças", não adianta esperar o timeout.
+            if monotonic() >= proxima_verificacao_licenca:
+                self.verificar_licenca()
+                proxima_verificacao_licenca = monotonic() + INTERVALO_VERIFICACAO_LICENCA
             try:
                 frames = list(self.page.frames)
                 for frame in frames:
@@ -1004,7 +1026,7 @@ class ProtheusPlaywrightMainFlow:
 #########################################################################################################
 #
 # Executa UMA rotina em uma sessão própria: abre navegador, login, MFA, empresa/filial,
-# caminho da rotina e fecha o navegador. Cada thread chama esta função.
+# caminho da rotina e fecha o navegador. Chamada uma vez para cada rotina.
 #
 #########################################################################################################
 def executar_rotina_isolada(
@@ -1031,9 +1053,10 @@ def executar_rotina_isolada(
     descricao_final = "FINALIZANDO EXECUCAO"
     login_retry_requested = False
     inicio_rotina: float | None = None
+    flow: ProtheusPlaywrightMainFlow | None = None
 
     try:
-        # Uma instância do Playwright por thread (a API sync não pode ser compartilhada entre threads).
+        # Sessão nova: Playwright e navegador próprios para esta rotina.
         with sync_playwright() as playwright:
 
             firefox_prefs = {
@@ -1083,33 +1106,32 @@ def executar_rotina_isolada(
                 cronometro.atualizar_acao("Iniciando funcao para fechar tela de tamanho se existir...")
                 flow.fechar_tela_tamanho_se_existir(cronometro)
 
-                # ---- Trecho em fila entre as threads: login -> MFA -> empresa/filial -> MFA ----
-                cronometro.atualizar_acao("Aguardando vez para login/MFA (outras rotinas podem estar logando)")
-                with MFA_LOCK:
-                    cronometro.atualizar_acao("iniciando funcao de Login...")
-                    flow.fazer_login(cronometro)
-                    logger.info("Login realizado com sucesso")
-                    cronometro.atualizar_acao("Login realizado com sucesso")
+                # ---- Login -> MFA -> empresa/filial (sessão nova a cada rotina) ----
+                cronometro.atualizar_acao("iniciando funcao de Login...")
+                flow.fazer_login(cronometro)
+                flow.verificar_licenca()  # a janela de licença costuma aparecer logo após o login
+                logger.info("Login realizado com sucesso")
+                cronometro.atualizar_acao("Login realizado com sucesso")
 
-                    cronometro.atualizar_acao("Iniciando validacao de MFA antes de preencher grupo/filial...")
-                    mfa_obtido = flow.confirmar_mfa_se_existir(cronometro, "antes de preencher grupo/filial")
+                cronometro.atualizar_acao("Iniciando validacao de MFA antes de preencher grupo/filial...")
+                mfa_obtido = flow.confirmar_mfa_se_existir(cronometro, "antes de preencher grupo/filial")
 
-                    cronometro.atualizar_acao("Iniciando funcao para preencher empresa/filial...")
-                    empresa_filial_ok = flow.preencher_empresa_filial(cronometro)
-                    if not empresa_filial_ok:
-                        raise PlaywrightError(
-                            "A etapa de empresa/filial não foi concluída; menu da rotina não será acessado"
-                        )
+                cronometro.atualizar_acao("Iniciando funcao para preencher empresa/filial...")
+                empresa_filial_ok = flow.preencher_empresa_filial(cronometro)
+                flow.verificar_licenca()
+                if not empresa_filial_ok:
+                    raise PlaywrightError(
+                        "A etapa de empresa/filial não foi concluída; menu da rotina não será acessado"
+                    )
 
-                    mfa_obtido = mfa_obtido or flow.mfa_confirmado
-                    if not mfa_obtido:
-                        cronometro.atualizar_acao("Iniciando funcao de verificar MFA depois de preencher grupo/filial...")
-                        flow.confirmar_mfa_se_existir(
-                            cronometro,
-                            "depois de preencher grupo/filial",
-                            wait_ms=5000,
-                        )
-                # ---- fim do trecho em fila ----
+                mfa_obtido = mfa_obtido or flow.mfa_confirmado
+                if not mfa_obtido:
+                    cronometro.atualizar_acao("Iniciando funcao de verificar MFA depois de preencher grupo/filial...")
+                    flow.confirmar_mfa_se_existir(
+                        cronometro,
+                        "depois de preencher grupo/filial",
+                        wait_ms=5000,
+                    )
 
                 cronometro.atualizar_acao(f"Executando rotina: {rotina.caminho}")
                 flow._registrar_estado_menu()
@@ -1123,19 +1145,35 @@ def executar_rotina_isolada(
                 cronometro.atualizar_acao("Execução da rotina concluida")
                 return ResultadoRotina(rotina.nome, rotina.caminho, round(segundos, 2), True)
             except Exception as e:
-                login_retry_requested = (
-                    cronometro.obter_acao()
-                    == "Iframe de login encontrado; preenchendo usuário"
-                )
+                # Um timeout qualquer pode ter sido causado pela janela de licença: confere a tela.
+                erro = e
+                if not isinstance(e, LicencaExcedidaError) and flow is not None:
+                    try:
+                        flow.verificar_licenca()
+                    except LicencaExcedidaError as erro_licenca:
+                        erro = erro_licenca
+                    except Exception:
+                        pass
+
                 status_final = "SIM"
-                erro_resumido = " ".join(str(e).split())
-                descricao_final = f"ERRO DURANTE EXECUCAO PLAYWRIGHT: {erro_resumido}"
+                erro_resumido = " ".join(str(erro).split())
+                if isinstance(erro, LicencaExcedidaError):
+                    login_retry_requested = False
+                    descricao_final = DESCRICAO_LICENCA
+                else:
+                    login_retry_requested = (
+                        cronometro.obter_acao()
+                        == "Iframe de login encontrado; preenchendo usuário"
+                    )
+                    descricao_final = f"ERRO DURANTE EXECUCAO PLAYWRIGHT: {erro_resumido}"
                 logger.exception("Exceção na rotina '%s': %s", rotina.nome, e)
                 if inicio_rotina is not None:
                     cronometro.registrar_rotina(rotina.nome, monotonic() - inicio_rotina, False)
                 cronometro.marcar_erro()
                 cronometro.atualizar_acao(f"Exceção não tratada na rotina: {erro_resumido}")
-                raise
+                if erro is e:
+                    raise
+                raise erro from e
             finally:
                 if browser is not None:
                     browser.close()
@@ -1156,6 +1194,10 @@ def executar_rotina_isolada(
                     except Exception:
                         logger.exception("Não foi possível calcular a média ou enviar o alerta de tempo")
     except Exception as global_err:
+        if isinstance(global_err, LicencaExcedidaError):
+            logger.error("Rotina '%s' não executada: %s", rotina.nome, global_err)
+            enviar_erro_licenca(rotina.nome, cronometro.obter_acao())
+            return ResultadoRotina(rotina.nome, rotina.caminho, 0.0, False, DESCRICAO_LICENCA)
         logger.exception("Erro na rotina '%s': %s", rotina.nome, global_err)
         if login_retry_requested and not _login_retry_attempted:
             logger.warning("Rotina '%s' interrompida no login; reiniciando uma única vez", rotina.nome)
@@ -1183,7 +1225,7 @@ def executar_rotina_isolada(
         return ResultadoRotina(rotina.nome, rotina.caminho, 0.0, False, erro_resumido)
 
 
-# ponto de entrada de cada thread: abre o log exclusivo da rotina e executa a rotina
+# abre o log exclusivo da rotina, executa a rotina e fecha o log
 def _executar_rotina_com_log(
     rotina: Rotina,
     indice_rotina: int,
@@ -1191,7 +1233,7 @@ def _executar_rotina_com_log(
     headless_override: bool | None = None,
 ) -> ResultadoRotina:
     # O ID é gerado aqui para já aparecer no nome do arquivo de log;
-    # as novas tentativas rodam na mesma thread e caem no mesmo arquivo.
+    # as novas tentativas da rotina caem no mesmo arquivo.
     id_execucao = LogBanco.nova_execucao_id()
     handler = logging_config.iniciar_log_da_rotina(indice_rotina, id_execucao, rotina.nome)
     logger.info("Log da rotina '%s' em %s", rotina.nome, handler.baseFilename)
@@ -1207,7 +1249,7 @@ def _executar_rotina_com_log(
 
 #########################################################################################################
 #
-# Função principal: distribui as rotinas em threads e consolida os tempos no final.
+# Função principal: executa as rotinas uma de cada vez (cada uma em sessão nova) e consolida os tempos.
 #
 #########################################################################################################
 def exec_playwright_from_main(
@@ -1217,30 +1259,19 @@ def exec_playwright_from_main(
     # Valida as rotinas ANTES de abrir qualquer navegador (falha rápida se a config estiver errada).
     lista_rotinas = rotinas_cfg.carregar_rotinas(CONFIG, fluxos_cli)
     total = len(lista_rotinas)
-    # Limita quantas sessões ficam abertas ao mesmo tempo (memória, licenças e WebAgent).
-    max_threads = max(1, min(int(CONFIG.get("MaxThreads", 3)), total))
-    logger.info("Rotinas a cronometrar (%d, até %d em paralelo): %s",
-                total, max_threads, [r.nome for r in lista_rotinas])
+    logger.info("Rotinas a cronometrar (%d, em sequência): %s", total, [r.nome for r in lista_rotinas])
 
-    # Mantém os resultados na mesma ordem do config, mesmo terminando fora de ordem.
-    resultados: list[ResultadoRotina | None] = [None] * total
-    with ThreadPoolExecutor(max_workers=max_threads, thread_name_prefix="rotina") as executor:
-        futuros = {
-            executor.submit(_executar_rotina_com_log, rotina, indice, total, headless_override): indice - 1
-            for indice, rotina in enumerate(lista_rotinas, start=1)
-        }
-        for futuro in as_completed(futuros):
-            posicao = futuros[futuro]
-            try:
-                resultados[posicao] = futuro.result()
-            except Exception as erro:  # proteção: erro inesperado que escapou da thread
-                rotina = lista_rotinas[posicao]
-                logger.exception("Erro inesperado na thread da rotina '%s': %s", rotina.nome, erro)
-                resultados[posicao] = ResultadoRotina(
-                    rotina.nome, rotina.caminho, 0.0, False, " ".join(str(erro).split())[:300]
-                )
+    resultados: list[ResultadoRotina] = []
+    for indice, rotina in enumerate(lista_rotinas, start=1):
+        try:
+            resultados.append(_executar_rotina_com_log(rotina, indice, total, headless_override))
+        except Exception as erro:  # proteção: um erro inesperado não impede as próximas rotinas
+            logger.exception("Erro inesperado na rotina '%s': %s", rotina.nome, erro)
+            resultados.append(ResultadoRotina(
+                rotina.nome, rotina.caminho, 0.0, False, " ".join(str(erro).split())[:300]
+            ))
 
-    # Entrega dos tempos: log + JSON. O log vai para o banco UMA vez, depois de todas as threads.
+    # Entrega dos tempos: log + JSON. O log geral vai para o banco uma vez, no final.
     logger.info(rotinas_cfg.formatar_resumo(resultados))
     relatorio = rotinas_cfg.salvar_relatorio(resultados, LogBanco.LOG_DIR, LogBanco.id_execucao)
     logger.info("Relatório de tempos salvo em %s", relatorio)

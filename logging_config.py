@@ -57,9 +57,9 @@ def get_logger(name: str = None):
 # ---------------------------------------------------------------------------
 # Log separado por rotina
 # ---------------------------------------------------------------------------
-# Cada rotina roda em uma thread própria. Para ter um arquivo só dela, adicionamos
-# ao logger raiz um FileHandler com um filtro que aceita apenas registros gerados
-# pela thread atual. O log geral (log_file) continua recebendo tudo.
+# Enquanto uma rotina roda, adicionamos ao logger raiz um FileHandler só dela.
+# O filtro pela thread atual deixa de fora a thread de fundo do cronômetro
+# (que grava "Registro inserido" a cada segundo). O log geral continua recebendo tudo.
 # Os arquivos ficam em log_playwright/rotinas/ (subpasta) para não confundir o
 # LogBanco.salvar(), que lê o .log mais recente direto de log_playwright/.
 rotinas_log_dir = log_dir / "rotinas"

@@ -139,18 +139,17 @@ python main_playwright.py --fluxo "Compras > Movimento > Pedidos de Compra > sai
 # no Docker, sobrescreva o comando ou use o config.json montado por volume
 ```
 
-Cada rotina roda em uma **sessao propria e em thread separada**: abre o navegador, faz login, MFA e empresa/filial, executa o caminho e fecha o navegador. Parametros:
+As rotinas rodam **uma de cada vez**, cada uma em uma **sessao nova**: abre o navegador, faz login, MFA e empresa/filial, executa o caminho e fecha o navegador.
 
 | Parametro | Padrao | Funcao |
 |---|---|---|
-| `MaxThreads` | `3` | Maximo de rotinas (navegadores) abertas ao mesmo tempo. |
 | `MfaTimeout` | `60000` | Tempo (ms) aguardando o e-mail do MFA da sessao. |
 
-- Login + MFA + empresa/filial sao feitos **em fila** entre as threads (um por vez), e o codigo MFA so e aceito se o e-mail chegou depois do clique em "Entrar" daquela sessao. As rotinas em si rodam em paralelo.
-- O tempo de cada rotina mede so os cliques do caminho (sem login) e sai em: log final (`Resumo dos tempos por rotina`), `RPA.TIMER` (cada rotina com seu proprio `ID_EXECUCAO`) e `log_playwright/tempos_rotinas_<id>.json`. O "Total das rotinas" e a soma dos tempos, nao o tempo de relogio.
+- O codigo MFA so e aceito se o e-mail chegou depois do clique em "Entrar" da sessao atual (nao reaproveita o codigo da rotina anterior).
+- O tempo de cada rotina mede so os cliques do caminho (sem login) e sai em: log final (`Resumo dos tempos por rotina`), `RPA.TIMER` (cada rotina com seu proprio `ID_EXECUCAO`) e `log_playwright/tempos_rotinas_<id>.json`. 
 - Logs: `log_playwright/*.log` continua com tudo (e e o que vai para o banco); cada rotina tem tambem um arquivo so dela em `log_playwright/rotinas/<data>_r<NN>_<id_execucao>_<nome>.log`.
 - Falha em uma rotina nao para as outras; as novas tentativas (`ExecutionRetries`) e o e-mail de erro valem por rotina.
-- Atencao: o mesmo usuario do Protheus abre varias sessoes ao mesmo tempo (licencas) e todas usam o mesmo WebAgent; comece com `MaxThreads` = 2.
+- Janela TOTVS **"Excedeu numero de licencas"**: reconhecida na tela (inclusive enquanto o robo espera um elemento), gravada como `ERRO LICENCA PROTHEUS` no `RPA.TIMER`, gera e-mail proprio e **nao** entra nas novas tentativas.
 
 Testes do parser de rotinas: `python -m unittest discover -s tests -v`
 
