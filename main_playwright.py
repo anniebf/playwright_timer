@@ -754,6 +754,7 @@ class ProtheusPlaywrightMainFlow:
         resultados: list[ResultadoRotina] = []
         total = len(lista_rotinas)
         tela_principal_ok = True
+        rotina_anterior: Rotina | None = None
 
         for indice, rotina in enumerate(lista_rotinas, start=1):
             # Sem a tela principal não há como abrir a próxima rotina pelo menu.
@@ -770,10 +771,15 @@ class ProtheusPlaywrightMainFlow:
                 logger.info("Rotina %d/%d '%s': %s", indice, total, rotina.nome, rotina.caminho)
                 cronometro.atualizar_acao(f"Rotina {indice}/{total} iniciada: {rotina.nome}")
 
+                # Prepara o menu (fora do tempo medido): recolhe o módulo da rotina anterior
+                # se o módulo mudou e calcula quantas etapas iniciais já estão abertas.
+                etapas_ja_abertas = self.preparar_menu(rotina_anterior, rotina)
+                rotina_anterior = rotina
+
                 # ---- tempo da rotina: só os cliques do caminho ----
                 inicio = monotonic()
                 try:
-                    self.executar_rotina(cronometro, rotina, indice, total)
+                    self.executar_rotina(cronometro, rotina, indice, total, etapas_ja_abertas)
                     resultado = ResultadoRotina(rotina.nome, rotina.caminho, round(monotonic() - inicio, 2), True)
                 except Exception as erro:
                     resultado = self._tratar_falha_rotina(cronometro, rotina, erro, monotonic() - inicio)
@@ -815,15 +821,19 @@ class ProtheusPlaywrightMainFlow:
         return ResultadoRotina(rotina.nome, rotina.caminho, round(segundos, 2), False, erro_resumido)
 
     # executa as etapas de UMA rotina, na ordem informada no caminho
-    def executar_rotina(self, cronometro, rotina: Rotina, indice_rotina: int, total_rotinas: int) -> None:
+    def executar_rotina(
+        self,
+        cronometro,
+        rotina: Rotina,
+        indice_rotina: int,
+        total_rotinas: int,
+        etapas_ja_abertas: int = 0,
+    ) -> None:
+        """etapas_ja_abertas: quantas etapas iniciais do menu já estão expandidas
+        (calculado em preparar_menu). Clicar nelas de novo RECOLHERIA o menu, então são puladas."""
         etapas_fluxo = list(rotina.etapas)
         menu_timeout = int(CONFIG.get("MenuTimeout", 60000))
         rotina_timeout = int(CONFIG.get("RotinaTimeout", 90000))
-
-        # A partir da 2ª rotina o menu pode continuar expandido (ex.: "Compras" já aberto).
-        # Clicar de novo RECOLHERIA o menu; então, enquanto a etapa SEGUINTE já estiver
-        # visível, a etapa atual é pulada. Depois do primeiro clique real, não pula mais.
-        pode_pular_expandidas = indice_rotina > 1
 
         for indice, etapa in enumerate(etapas_fluxo, start=1):
             # A primeira etapa (menu) usa MenuTimeout; as demais, RotinaTimeout.
@@ -832,11 +842,9 @@ class ProtheusPlaywrightMainFlow:
             logger.info("%s do fluxo: '%s'", prefixo, etapa)
             cronometro.atualizar_acao(f"{prefixo}: procurando '{etapa}'")
 
-            if pode_pular_expandidas and indice < len(etapas_fluxo):
-                if self._item_visivel_rapido(etapas_fluxo[indice]):
-                    logger.info("%s: '%s' já está expandido no menu; etapa pulada", prefixo, etapa)
-                    continue
-                pode_pular_expandidas = False
+            if indice <= etapas_ja_abertas:
+                logger.info("%s: '%s' já está expandido no menu; etapa pulada", prefixo, etapa)
+                continue
 
             if etapa.casefold() in rotinas_cfg.ETAPAS_SAIDA:
                 # 'sair'/'fechar' = botão de fechar a tela da rotina
@@ -851,6 +859,49 @@ class ProtheusPlaywrightMainFlow:
             )
             cronometro.atualizar_acao(f"{prefixo} concluída: '{etapa}'")
             sleep(1)
+
+    # deixa o menu pronto para a próxima rotina e devolve quantas etapas iniciais pular
+    def preparar_menu(self, anterior: Rotina | None, proxima: Rotina) -> int:
+        """Evita confundir itens de mesmo nome em módulos diferentes (ex.: 'Movimento').
+
+        1. Se o módulo mudou (Compras -> Fiscal), recolhe o módulo anterior, para que
+           só os itens do módulo novo fiquem visíveis.
+        2. Só considera "já aberta" uma etapa que também estava no MESMO lugar do
+           caminho da rotina anterior (prefixo em comum) e cujo próximo item está visível.
+        """
+        if anterior is None:
+            return 0
+
+        if proxima.etapas[0].casefold() != anterior.etapas[0].casefold():
+            self._recolher_modulo(anterior)
+            return 0
+
+        etapas_abertas = 0
+        for posicao, etapa in enumerate(proxima.etapas[:-1]):
+            if posicao >= len(anterior.etapas) or etapa.casefold() != anterior.etapas[posicao].casefold():
+                break
+            if not self._item_visivel_rapido(proxima.etapas[posicao + 1]):
+                break
+            etapas_abertas = posicao + 1
+        logger.info("Menu: %d etapa(s) iniciais de '%s' já abertas", etapas_abertas, proxima.nome)
+        return etapas_abertas
+
+    # recolhe o módulo raiz da rotina anterior (clicar no item expandido fecha o submenu)
+    def _recolher_modulo(self, anterior: Rotina) -> None:
+        if len(anterior.etapas) < 2:
+            return
+        modulo, filho = anterior.etapas[0], anterior.etapas[1]
+        if not self._item_visivel_rapido(filho):
+            return  # já está recolhido
+        logger.info("Recolhendo o menu '%s' antes de abrir outro módulo", modulo)
+        try:
+            self._esperar_e_clicar(modulo, timeout=5000, pressionar_escape_ao_falhar=False)
+            sleep(0.5)
+        except (PlaywrightTimeoutError, PlaywrightError) as erro:
+            logger.warning("Não foi possível recolher o menu '%s': %s", modulo, erro)
+            return
+        if self._item_visivel_rapido(filho):
+            logger.warning("O menu '%s' continua expandido após o clique", modulo)
 
     # fecha a tela da rotina e confirma que o menu principal voltou a aparecer
     def voltar_tela_principal(self, cronometro, rotina: Rotina, ja_fechou: bool) -> bool:

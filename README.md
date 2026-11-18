@@ -157,7 +157,7 @@ Rotina 2: ...                                             -> tempo "Rotina 2"
 
 - **Tempos**: log final (`Resumo dos tempos por rotina`, comecando pelo Login), `RPA.TIMER` (linhas `Tempo Login: Ns` e `Tempo Rotina '<nome>': Ns`, com `TEMPO_EXECUCAO` = segundos do item, todas com o mesmo `ID_EXECUCAO`) e `log_playwright/tempos_rotinas_<id>.json`.
 - **Tela principal**: depois de cada rotina o robo clica em sair (se o caminho nao terminou em `sair`) e confirma que a 1a etapa do caminho (o modulo, ex.: `Compras`) esta visivel no menu.
-- **Menu expandido**: a partir da 2a rotina, etapas iniciais cujo submenu ja esta aberto sao puladas (clicar de novo recolheria o menu).
+- **Menu expandido** (preparado antes do tempo da rotina): se o modulo muda (ex.: Compras -> Fiscal), o robo recolhe o modulo anterior, para nao confundir itens de mesmo nome como `Movimento`. Se o modulo e o mesmo, pula apenas as etapas iniciais iguais as da rotina anterior que ja estao abertas (clicar de novo recolheria o menu).
 - **Logs**: `log_playwright/*.log` tem tudo (e e o que vai para o banco); `log_playwright/rotinas/` tem um arquivo para o login (`r00`) e um para cada rotina.
 - **Falhas**: no login, a execucao inteira e repetida (`ExecutionRetries`); em uma rotina, ela fica com erro (e-mail enviado) e a proxima segue. Se nao der para voltar a tela principal, as rotinas restantes ficam como `NAO EXECUTADA`.
 - O codigo MFA so e aceito se o e-mail chegou depois do clique em "Entrar" da sessao atual.
