@@ -8,7 +8,11 @@ LÓGICA GERAL
 2. LOGIN ÚNICO: abre o navegador, acessa a URL, faz login, MFA e empresa/filial
    uma única vez. Esse trecho é cronometrado como "Login".
 3. Para cada rotina, na mesma sessão:
-   a) executa o caminho (menu > rotina > ações) - cronometrado individualmente;
+   a) executa o caminho (menu > rotina > ações) - cronometrado individualmente.
+      O menu é percorrido LENDO A ÁRVORE do WebApp (wa-menu / wa-menu-item, que é
+      aninhada): cada item é procurado só dentro do item pai (evita confundir
+      "Compras > Movimento" com "Fiscal > Movimento") e pastas já abertas não são
+      clicadas (clicar fecharia). O menu é um acordeão: abrir um módulo fecha o outro;
    b) volta para a tela principal (fora do tempo medido): fecha a tela da rotina
       e confirma que o menu (1ª etapa do caminho) está visível de novo.
 4. Os tempos (Login, Rotina 1, Rotina 2, ...) vão para:
@@ -62,6 +66,33 @@ logger = logging_config.get_logger("main_playwright_from_main")
 BUILD_VERSION = "2026-11-18-login-unico-rotinas"
 # Intervalo (s) entre verificações da janela de licença enquanto espera um elemento.
 INTERVALO_VERIFICACAO_LICENCA = 3
+
+# Lê a árvore do menu do WebApp e devolve o item `texto` que é filho DIRETO do item
+# `escopoId` (ou da raiz do menu, se escopoId for null). Estrutura do WebApp:
+#   <wa-menu> <wa-menu-item caption="Compras (7)"> <wa-menu-item caption="Movimento (26)"> ...
+# - compara o texto ignorando maiúsculas, tags (<u>) e o contador "(26)";
+# - "pasta": tem contador ou subitens; "aberta": algum subitem está visível;
+# - subitens são criados só na primeira vez que a pasta abre (carga sob demanda).
+JS_LOCALIZAR_ITEM_MENU = """
+([escopoId, texto]) => {
+  const norm = s => (s || '').replace(/<[^>]+>/g, '').replace(/\\(\\d+\\)\\s*$/, '')
+                             .replace(/\\s+/g, ' ').trim().toLowerCase();
+  const filhos = e => [...e.children].filter(c => c.tagName === 'WA-MENU-ITEM');
+  const visivel = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const escopo = escopoId
+    ? document.getElementById(escopoId)
+    : [...document.querySelectorAll('wa-menu')].find(m => filhos(m).some(visivel));
+  if (!escopo) return null;
+  const item = filhos(escopo).find(e => visivel(e) && norm(e.getAttribute('caption')) === norm(texto));
+  if (!item) return null;
+  const sub = filhos(item);
+  return {
+    id: item.id,
+    pasta: /\\(\\d+\\)\\s*$/.test(item.getAttribute('caption') || '') || sub.length > 0,
+    aberta: sub.some(visivel),
+  };
+}
+"""
 
 # Carrega o arquivo JSON com log de falha caso ocorra erro na leitura
 try:
@@ -754,7 +785,6 @@ class ProtheusPlaywrightMainFlow:
         resultados: list[ResultadoRotina] = []
         total = len(lista_rotinas)
         tela_principal_ok = True
-        rotina_anterior: Rotina | None = None
 
         for indice, rotina in enumerate(lista_rotinas, start=1):
             # Sem a tela principal não há como abrir a próxima rotina pelo menu.
@@ -771,15 +801,10 @@ class ProtheusPlaywrightMainFlow:
                 logger.info("Rotina %d/%d '%s': %s", indice, total, rotina.nome, rotina.caminho)
                 cronometro.atualizar_acao(f"Rotina {indice}/{total} iniciada: {rotina.nome}")
 
-                # Prepara o menu (fora do tempo medido): recolhe o módulo da rotina anterior
-                # se o módulo mudou e calcula quantas etapas iniciais já estão abertas.
-                etapas_ja_abertas = self.preparar_menu(rotina_anterior, rotina)
-                rotina_anterior = rotina
-
                 # ---- tempo da rotina: só os cliques do caminho ----
                 inicio = monotonic()
                 try:
-                    self.executar_rotina(cronometro, rotina, indice, total, etapas_ja_abertas)
+                    self.executar_rotina(cronometro, rotina, indice, total)
                     resultado = ResultadoRotina(rotina.nome, rotina.caminho, round(monotonic() - inicio, 2), True)
                 except Exception as erro:
                     resultado = self._tratar_falha_rotina(cronometro, rotina, erro, monotonic() - inicio)
@@ -821,30 +846,20 @@ class ProtheusPlaywrightMainFlow:
         return ResultadoRotina(rotina.nome, rotina.caminho, round(segundos, 2), False, erro_resumido)
 
     # executa as etapas de UMA rotina, na ordem informada no caminho
-    def executar_rotina(
-        self,
-        cronometro,
-        rotina: Rotina,
-        indice_rotina: int,
-        total_rotinas: int,
-        etapas_ja_abertas: int = 0,
-    ) -> None:
-        """etapas_ja_abertas: quantas etapas iniciais do menu já estão expandidas
-        (calculado em preparar_menu). Clicar nelas de novo RECOLHERIA o menu, então são puladas."""
+    def executar_rotina(self, cronometro, rotina: Rotina, indice_rotina: int, total_rotinas: int) -> None:
         etapas_fluxo = list(rotina.etapas)
-        menu_timeout = int(CONFIG.get("MenuTimeout", 60000))
         rotina_timeout = int(CONFIG.get("RotinaTimeout", 90000))
 
-        for indice, etapa in enumerate(etapas_fluxo, start=1):
-            # A primeira etapa (menu) usa MenuTimeout; as demais, RotinaTimeout.
-            timeout = rotina_timeout if indice > 1 else menu_timeout
+        # 1) Etapas do menu: percorridas pela árvore (até abrir a rotina).
+        etapas_menu = self._navegar_menu(cronometro, rotina, indice_rotina, total_rotinas)
+
+        # 2) Demais etapas: ações dentro da tela da rotina (Visualizar, Cancelar, sair...).
+        for indice in range(etapas_menu + 1, len(etapas_fluxo) + 1):
+            etapa = etapas_fluxo[indice - 1]
+            timeout = rotina_timeout
             prefixo = f"Rotina {indice_rotina}/{total_rotinas} - Etapa {indice}/{len(etapas_fluxo)}"
             logger.info("%s do fluxo: '%s'", prefixo, etapa)
             cronometro.atualizar_acao(f"{prefixo}: procurando '{etapa}'")
-
-            if indice <= etapas_ja_abertas:
-                logger.info("%s: '%s' já está expandido no menu; etapa pulada", prefixo, etapa)
-                continue
 
             if etapa.casefold() in rotinas_cfg.ETAPAS_SAIDA:
                 # 'sair'/'fechar' = botão de fechar a tela da rotina
@@ -860,48 +875,73 @@ class ProtheusPlaywrightMainFlow:
             cronometro.atualizar_acao(f"{prefixo} concluída: '{etapa}'")
             sleep(1)
 
-    # deixa o menu pronto para a próxima rotina e devolve quantas etapas iniciais pular
-    def preparar_menu(self, anterior: Rotina | None, proxima: Rotina) -> int:
-        """Evita confundir itens de mesmo nome em módulos diferentes (ex.: 'Movimento').
-
-        1. Se o módulo mudou (Compras -> Fiscal), recolhe o módulo anterior, para que
-           só os itens do módulo novo fiquem visíveis.
-        2. Só considera "já aberta" uma etapa que também estava no MESMO lugar do
-           caminho da rotina anterior (prefixo em comum) e cujo próximo item está visível.
+    # percorre as etapas do menu pela árvore; devolve quantas etapas do caminho eram do menu
+    def _navegar_menu(self, cronometro, rotina: Rotina, indice_rotina: int, total_rotinas: int) -> int:
+        """Ex.: "Fiscal > Movimento > Documento Entrada > Visualizar":
+        - Fiscal: procurado na raiz; se fechado, clica (o acordeão fecha o módulo anterior);
+        - Movimento: procurado SÓ dentro de Fiscal; se já aberto, não clica;
+        - Documento Entrada: não é pasta -> clica e a rotina abre. Retorna 3.
+        As etapas seguintes (Visualizar...) ficam para executar_rotina.
         """
-        if anterior is None:
-            return 0
+        menu_timeout = int(CONFIG.get("MenuTimeout", 60000))
+        passo_timeout = int(CONFIG.get("MenuStepTimeout", 15000))
+        escopo_id: str | None = None  # None = raiz do menu
+        total_etapas = len(rotina.etapas)
 
-        if proxima.etapas[0].casefold() != anterior.etapas[0].casefold():
-            self._recolher_modulo(anterior)
-            return 0
+        for indice, etapa in enumerate(rotina.etapas, start=1):
+            if etapa.casefold() in rotinas_cfg.ETAPAS_SAIDA:
+                return indice - 1
+            prefixo = f"Rotina {indice_rotina}/{total_rotinas} - Etapa {indice}/{total_etapas}"
+            cronometro.atualizar_acao(f"{prefixo}: procurando '{etapa}' no menu")
 
-        etapas_abertas = 0
-        for posicao, etapa in enumerate(proxima.etapas[:-1]):
-            if posicao >= len(anterior.etapas) or etapa.casefold() != anterior.etapas[posicao].casefold():
-                break
-            if not self._item_visivel_rapido(proxima.etapas[posicao + 1]):
-                break
-            etapas_abertas = posicao + 1
-        logger.info("Menu: %d etapa(s) iniciais de '%s' já abertas", etapas_abertas, proxima.nome)
-        return etapas_abertas
+            # A raiz pode demorar logo após o login; dentro de uma pasta, os subitens
+            # aparecem depois do clique (carga sob demanda).
+            timeout = menu_timeout if indice == 1 else passo_timeout
+            achado = self._aguardar_item_menu(escopo_id, etapa, timeout)
+            if achado is None:
+                local = "na raiz do menu" if escopo_id is None else f"dentro de '{rotina.etapas[indice - 2]}'"
+                raise PlaywrightTimeoutError(f"Item '{etapa}' não encontrado {local} após {timeout}ms")
+            frame, item = achado
 
-    # recolhe o módulo raiz da rotina anterior (clicar no item expandido fecha o submenu)
-    def _recolher_modulo(self, anterior: Rotina) -> None:
-        if len(anterior.etapas) < 2:
-            return
-        modulo, filho = anterior.etapas[0], anterior.etapas[1]
-        if not self._item_visivel_rapido(filho):
-            return  # já está recolhido
-        logger.info("Recolhendo o menu '%s' antes de abrir outro módulo", modulo)
-        try:
-            self._esperar_e_clicar(modulo, timeout=5000, pressionar_escape_ao_falhar=False)
-            sleep(0.5)
-        except (PlaywrightTimeoutError, PlaywrightError) as erro:
-            logger.warning("Não foi possível recolher o menu '%s': %s", modulo, erro)
-            return
-        if self._item_visivel_rapido(filho):
-            logger.warning("O menu '%s' continua expandido após o clique", modulo)
+            if item["pasta"] and item["aberta"]:
+                # Clicar numa pasta aberta a fecharia.
+                logger.info("%s: pasta '%s' já está aberta; sem clique", prefixo, etapa)
+            else:
+                # Clica na linha do título (topo do item; abaixo ficam os subitens).
+                frame.locator(f"wa-menu-item#{item['id']}").click(position={"x": 40, "y": 10}, timeout=timeout)
+                logger.info("%s: clique em '%s' (menu, %s)", prefixo, etapa, item["id"])
+                nome_etapa = re.sub(r"[^A-Za-z0-9_-]+", "_", etapa).strip("_") or f"etapa_{indice}"
+                self.page.screenshot(
+                    path=str(LogBanco.LOG_DIR / f"fluxo_r{indice_rotina:02d}_{indice:02d}_{nome_etapa}.png"),
+                    full_page=True,
+                )
+            cronometro.atualizar_acao(f"{prefixo} concluída: '{etapa}'")
+
+            if not item["pasta"]:
+                return indice  # a rotina foi aberta; o resto do caminho são ações na tela dela
+            escopo_id = item["id"]
+
+        return total_etapas
+
+    # espera o item aparecer na árvore do menu (dentro do pai informado)
+    def _aguardar_item_menu(self, escopo_id: str | None, texto: str, timeout: int):
+        """Retorna (frame, {"id", "pasta", "aberta"}) ou None se não aparecer no tempo."""
+        deadline = monotonic() + timeout / 1000
+        proxima_verificacao_licenca = monotonic()
+        while True:
+            if monotonic() >= proxima_verificacao_licenca:
+                self.verificar_licenca()
+                proxima_verificacao_licenca = monotonic() + INTERVALO_VERIFICACAO_LICENCA
+            for frame in list(self.page.frames):
+                try:
+                    item = frame.evaluate(JS_LOCALIZAR_ITEM_MENU, [escopo_id, texto])
+                except PlaywrightError:
+                    continue  # frame recarregando/descartado
+                if item:
+                    return frame, item
+            if monotonic() >= deadline:
+                return None
+            sleep(0.3)
 
     # fecha a tela da rotina e confirma que o menu principal voltou a aparecer
     def voltar_tela_principal(self, cronometro, rotina: Rotina, ja_fechou: bool) -> bool:
