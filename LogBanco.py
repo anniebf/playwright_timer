@@ -157,9 +157,13 @@ class CronometroExecucao:
         if self._inicio_monotonic is not None:
             total = int(time.monotonic() - self._inicio_monotonic)
 
+        descricao_registro = descricao_final
+        if status_final == 'NAO' and descricao_final == 'FINALIZANDO EXECUCAO':
+            descricao_registro = 'FINALIZANDO EXECUCAO'
+
         registrar_timer(
             self.id_execucao,
-            formatar_descricao(status_final, descricao_final, total),
+            formatar_descricao(status_final, descricao_registro, total),
             sistema,
             usuario,
             status_final,
@@ -192,7 +196,8 @@ def resultado(id_execucao_atual: int | None = None):
             FROM (
                 SELECT TEMPO_EXECUCAO
                 FROM RPA.TIMER
-                WHERE DESCRICAO = 'FINALIZANDO PROTHEUS_TIR'
+                     WHERE (DESCRICAO = 'FINALIZANDO EXECUCAO'
+                         OR DESCRICAO LIKE '% - Finalizando execução')
                   AND ERRO = 'NAO'
                   {filtro_execucao_atual}
                 ORDER BY HORARIO_EXECUCAO DESC, ID_EXECUCAO DESC
@@ -236,7 +241,7 @@ def inicio():
     data_atual = datetime.now() 
     data_inicio = data_atual.strftime('%Y-%m-%d %H:%M:%S')
     
-    registrar_timer(id_execucao, 'INICIANDO PROTHEUS_TIR', sistema, usuario, 'NAO', 0, data_inicio)
+    registrar_timer(id_execucao, 'INICIANDO EXECUCAO', sistema, usuario, 'NAO', 0, data_inicio)
     
     return data_atual
     

@@ -34,11 +34,11 @@ Ao iniciar, o container:
 6. Faz login no Protheus.
 7. Procura o codigo MFA recente no Microsoft Graph, quando a tela de MFA aparece.
 8. Preenche a empresa/filial, se `Setup_emp` estiver definido.
-9. Executa o menu configurado no codigo:
+9. Executa a rota configurada no `config.json`, por exemplo:
 
-   `Compras > Movimento > Pedidos de Compra`
+   `Compras > Movimento > Pedidos de Compra > Visualizar > Miscelanea > Senha > Alterar senha > sair`
 
-10. Executa a validacao `Visualizar` e `Cancelar`.
+10. Localiza e clica em cada etapa da rota na ordem informada. A etapa `sair` usa o botão de fechamento da tela da rotina.
 11. Fecha o navegador, grava o encerramento no banco e encerra o container.
 
 ## 2. Pre-requisitos
@@ -93,7 +93,8 @@ Crie o arquivo com esta estrutura. Substitua os valores pelos dados do ambiente:
   "POUILogin": true,
   "LogFolder": "Log",
   "LogFile": true,
-  "StartProgram": true
+  "StartProgram": true,
+  "Fluxo": "Compras > Movimento > Pedidos de Compra > Visualizar > Miscelanea > Senha > Alterar senha > sair"
 }
 ```
 
@@ -109,11 +110,18 @@ Crie o arquivo com esta estrutura. Substitua os valores pelos dados do ambiente:
 | `Password` | string | Sim | Senha usada no formulario de login do Protheus. |
 | `DebugLog` | booleano | Nao | Mantido para compatibilidade; o fluxo atual nao usa esse valor diretamente. |
 | `TimeOut` | inteiro | Nao | Timeout base em segundos. O codigo converte esse valor para milissegundos. Padrao: `30`. |
+| `MenuTimeout` | inteiro | Nao | Timeout total para localizar cada etapa do menu. Padrao: `60000` ms. |
+| `MenuStepTimeout` | inteiro | Nao | Timeout de cada transicao do menu antes de iniciar a recuperacao. Padrao: `15000` ms. |
+| `ParametrosTimeout` | inteiro | Nao | Tempo para localizar os campos de rotina e ambiente na tela inicial. Padrao: `60000` ms. |
+| `ExecutionRetries` | inteiro | Nao | Quantidade de reinicios completos para falhas do Playwright. Padrao: `2`. |
 | `Headless` | booleano | Nao | Define se o navegador abre sem interface. Padrao: `true`. |
 | `POUILogin` | booleano | Nao | Mantido para compatibilidade; nao controla diretamente o fluxo atual. |
 | `LogFolder` | string | Nao | Mantido para compatibilidade; os logs atuais sao gravados em `log_playwright`. |
 | `LogFile` | booleano | Nao | Mantido para compatibilidade; o logging atual sempre cria arquivo e console. |
 | `StartProgram` | booleano | Nao | Mantido para compatibilidade; nao controla diretamente o fluxo atual. |
+| `Fluxo` | string | Sim | Etapas separadas por `>`, localizadas e acionadas na ordem informada. Use `sair` para fechar a tela da rotina. |
+
+`Fluxo` e a unica rota usada pela automacao e deve ser informado no `config.json`.
 
 O codigo aceita valores booleanos reais no JSON, por exemplo `true` e `false`. Para `Headless`, tambem sao reconhecidos textos como `true`, `false`, `1`, `0`, `yes` e `no`.
 

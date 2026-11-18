@@ -20,24 +20,21 @@ from playwright.sync_api import (
     sync_playwright,
 )
 
-from MandaEmail import enviar_erro_base_selenium, enviar_erro_execucao
+from MandaEmail import enviar_erro_base_selenium, enviar_erro_execucao, enviar_temp_exc
 import graph
 import LogBanco
 import logging_config
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
-#MENU_LATERAL = "Compras > Movimento > Pedidos de Compra"
 
 logger = logging_config.get_logger("main_playwright_from_main")
-BUILD_VERSION = "2026-09-21-menu-navigation-1"
+BUILD_VERSION = "2026-09-25-menu-retry-2"
 
 # Carrega o arquivo JSON com log de falha caso ocorra erro na leitura
 try:
     with CONFIG_PATH.open("r", encoding="utf-8") as config_file:
         CONFIG = json.load(config_file)
-        MENU_LATERAL = CONFIG.get("MenuLateral")
-        print(MENU_LATERAL)
 except Exception as e:
     logger.exception("Erro crítico ao carregar arquivo de configuração (%s): %s", CONFIG_PATH, e)
     sys.exit(1)
@@ -213,9 +210,17 @@ class ProtheusPlaywrightMainFlow:
         rotina = os.getenv("Setup_rotina") or "SIGAADV"
         ambiente = os.getenv("Setup_ambiente") or CONFIG.get("Environment", "bf")
         self._atualizar_acao(f"Aguardando tela inicial; rotina='{rotina}', ambiente='{ambiente}'")
-        sleep(5)
-        self._fill(["wa-combobox#selectStartProg input", "wa-combobox#selectStartProg"], rotina)
-        self._fill(["wa-combobox#selectEnv input", "wa-combobox#selectEnv"], ambiente)
+        parametros_timeout = int(CONFIG.get("ParametrosTimeout", 60000))
+        self._fill(
+            ["wa-combobox#selectStartProg input", "wa-combobox#selectStartProg"],
+            rotina,
+            timeout=parametros_timeout,
+        )
+        self._fill(
+            ["wa-combobox#selectEnv input", "wa-combobox#selectEnv"],
+            ambiente,
+            timeout=parametros_timeout,
+        )
 
         botao_ok = self.page.locator("wa-dialog.startParameters wa-button button").last
         try:
@@ -305,10 +310,10 @@ class ProtheusPlaywrightMainFlow:
             raise PlaywrightTimeoutError(err_msg)
 
         self._atualizar_acao("Iframe de login encontrado; preenchendo usuário")
-        login_frame.locator('input[name="login"]').last.fill(username, timeout=200000)
+        login_frame.locator('input[name="login"]').last.fill(username, timeout=100000)
         logger.info("Campo de usuário preenchido")
         cronometro.atualizar_acao("Campo de usuário preenchido")
-        login_frame.locator('input[name="password"]').last.fill(password, timeout=200000)
+        login_frame.locator('input[name="password"]').last.fill(password, timeout=100000)
         logger.info("Campo de senha preenchido")
         cronometro.atualizar_acao("Campo de senha preenchido")
         sleep(1)
@@ -465,6 +470,19 @@ class ProtheusPlaywrightMainFlow:
         logger.info("Setup_emp definido; preenchendo empresa/filial e aguardando Entrar")
 
         try:
+            menu_disponivel = self._primeiro_elemento_visivel(
+                ["Compras"],
+                timeout=1000,
+            )
+            if menu_disponivel == "Compras":
+                logger.info(
+                    "Menu já está disponível; tela de empresa/filial não é necessária"
+                )
+                cronometro.atualizar_acao(
+                    "Menu já disponível; etapa de empresa/filial ignorada"
+                )
+                return True
+
             # Preenche o campo de empresa/filial com base em uma lista de seletores possíveis
             self._atualizar_acao(
                 f"Procurando campo de empresa/filial para preencher '{emp}'"
@@ -478,7 +496,7 @@ class ProtheusPlaywrightMainFlow:
                     'input[aria-label*="empresa" i]',
                 ],
                 emp,
-                timeout=50000,
+                timeout=int(CONFIG.get("EmpresaTimeout", 15000)),
             )
             filial = os.getenv("Setup_filial")
             if filial:
@@ -500,13 +518,24 @@ class ProtheusPlaywrightMainFlow:
             logger.info("Campo de empresa/filial preenchido; procurando botão Entrar")
             self._atualizar_acao("Campo de empresa/filial preenchido; procurando botão Entrar")
             try:
-                # Primeiro tenta Entrar; o MFA só é verificado se esse clique falhar.
-                sleep(10)
-                self._esperar_e_clicar(
-                    "Entrar",
-                    timeout=30000,
-                    pressionar_escape_ao_falhar=False,
+                # Aguarda a tela seguinte sem impor uma pausa fixa de 10 segundos.
+                proxima_tela = self._primeiro_elemento_visivel(
+                    ["Entrar", "Compras"],
+                    timeout=int(CONFIG.get("EntrarTimeout", 15000)),
                 )
+                if proxima_tela == "Entrar":
+                    self._esperar_e_clicar(
+                        "Entrar",
+                        timeout=5000,
+                        pressionar_escape_ao_falhar=False,
+                    )
+                elif proxima_tela == "Compras":
+                    logger.info("Menu disponível após preencher empresa/filial")
+                    return True
+                else:
+                    raise PlaywrightTimeoutError(
+                        "Nem 'Entrar' nem 'Compras' apareceram após preencher empresa/filial"
+                    )
             except PlaywrightTimeoutError:
                 logger.warning(
                     "Entrar não apareceu após preencher empresa/filial; verificando MFA antes de tentar novamente"
@@ -630,7 +659,7 @@ class ProtheusPlaywrightMainFlow:
             return False
 
     # função para confirmar o MFA, caso ele apareça na tela, e registrar a ação no cronometro
-    def confirmar_mfa_se_existir(self,cronometro, etapa: str, wait_ms: int = 9000) -> bool:
+    def confirmar_mfa_se_existir(self,cronometro, etapa: str, wait_ms: int = 12000) -> bool:
         confirmado = self.confirmar_mfa(cronometro, wait_ms=wait_ms)
         if confirmado:
             logger.info("MFA confirmado %s", etapa)
@@ -642,85 +671,65 @@ class ProtheusPlaywrightMainFlow:
 
     # função principal que executa a rotina de teste, acessando o menu lateral e realizando ações de validação
     def executar_rotina_teste(self,cronometro, max_retries: int = 3) -> None:
-        logger.info("Acessando menu lateral: %s", MENU_LATERAL)
-        cronometro.atualizar_acao("Acessando menu lateral: %s" % MENU_LATERAL)
+        fluxo_configurado = CONFIG.get("Fluxo")
+        if not isinstance(fluxo_configurado, str) or not fluxo_configurado.strip():
+            raise ValueError("A configuração precisa definir 'Fluxo'.")
+
+        etapas_fluxo = [
+            parte.strip()
+            for parte in fluxo_configurado.split(">")
+            if parte.strip()
+        ]
+        logger.info("Executando fluxo configurado: %s", " > ".join(etapas_fluxo))
+        cronometro.atualizar_acao(
+            "Executando fluxo configurado: %s" % " > ".join(etapas_fluxo)
+        )
         # força a atualização do estado do menu antes de tentar acessar a rotina
         self._registrar_estado_menu()
-        menu_timeout = int(CONFIG.get("MenuTimeout", 120000))
-        etapas_menu = [parte.strip() for parte in MENU_LATERAL.split(">") if parte.strip()]
-        self._acessar_menu_rotina(etapas_menu, menu_timeout)
-
-        logger.info("Executando rotina de validacao")
-        cronometro.atualizar_acao("Executando rotina de validacao")
-
-        # Define o timeout da rotina a partir da configuração, com valor padrão de 90000ms
+        menu_timeout = int(CONFIG.get("MenuTimeout", 60000))
         rotina_timeout = int(CONFIG.get("RotinaTimeout", 90000))
-        for tentativa in range(1, max_retries + 1):
-            self._garantir_tela_pedidos(
-                etapas_menu,
-                menu_timeout,
-                rotina_timeout,
+        for indice, etapa in enumerate(etapas_fluxo, start=1):
+            etapa_normalizada = etapa.casefold()
+            timeout = rotina_timeout if indice > 1 else menu_timeout
+            logger.info(
+                "Etapa %d/%d do fluxo: '%s'",
+                indice,
+                len(etapas_fluxo),
+                etapa,
             )
-            logger.info("Tentativa %d de %d: aguardando 'Visualizar'", tentativa, max_retries)
             cronometro.atualizar_acao(
-                "Tentativa %d de %d: aguardando 'Visualizar'" % (tentativa, max_retries)
+                "Etapa %d/%d: procurando '%s'" % (indice, len(etapas_fluxo), etapa)
             )
-            try:
-                self._esperar_e_clicar("Visualizar", timeout=rotina_timeout)
-            except PlaywrightTimeoutError:
-                self._registrar_falha_rotina("Visualizar", tentativa)
-                raise
 
-            self.page.screenshot(path=f"Visualizar_tentativa_{tentativa}.png", full_page=True)
+            if etapa_normalizada in {"sair", "fechar", "fechar tela"}:
+                seletor_saida = "wa-button#COMP6014 button"
+                self._esperar_e_clicar(seletor_saida, timeout=timeout)
+            else:
+                self._esperar_e_clicar(etapa, timeout=timeout)
+
+            nome_etapa = re.sub(r"[^A-Za-z0-9_-]+", "_", etapa).strip("_") or f"etapa_{indice}"
+            self.page.screenshot(
+                path=str(LogBanco.LOG_DIR / f"fluxo_{indice:02d}_{nome_etapa}.png"),
+                full_page=True,
+            )
             cronometro.atualizar_acao(
-                "Ação 'Clicar em Visualizar' concluída na tentativa %d" % tentativa
+                "Etapa %d/%d concluída: '%s'" % (indice, len(etapas_fluxo), etapa)
             )
-
-            logger.info("Aguardando botão 'Cancelar' após Visualizar...")
-            try:
-                self._esperar_e_clicar("Cancelar", timeout=rotina_timeout)
-            except PlaywrightTimeoutError:
-                self._registrar_falha_rotina("Cancelar", tentativa)
-                if tentativa == max_retries:
-                    raise
-
-                logger.warning(
-                    "'Cancelar' não apareceu após 'Visualizar'. "
-                    "Preparando a tela atual antes da próxima tentativa."
-                )
-                cronometro.atualizar_acao(
-                    "Cancelar não apareceu após Visualizar; recuperando a tela"
-                )
-                self._recuperar_tela_rotina()
-                sleep(2)
-                continue
-
-            cronometro.atualizar_acao(
-                "Ação 'Clicar em Cancelar' concluída na tentativa %d" % tentativa
-            )
-            self.page.screenshot(path="Cancelar.png", full_page=True)
-            logger.info("Elemento 'Cancelar' encontrado e clicado com sucesso!")
-            cronometro.atualizar_acao(
-                "Elemento 'Cancelar' encontrado e clicado com sucesso na tentativa %d" % tentativa
-            )
-            break
-
-        # Para fechar/sair após o sucesso do fluxo
-        try:
-            self._esperar_e_clicar("wa-button#COMP6014 button", timeout=90000)
-            self.page.screenshot(path="sair.png", full_page=True)
-            cronometro.atualizar_acao("Clicando no botão de fechar/sair (#COMP6014)")
-        except Exception as e:
-            logger.warning("Não foi possível clicar no botão de fechar/sair (#COMP6014): %s", e)
-            cronometro.atualizar_acao("Não foi possível clicar no botão de fechar/sair (#COMP6014)")
+            sleep(1)
 
     # função auxiliar para garantir que a tela de pedidos esteja pronta antes de prosseguir
     def _acessar_menu_rotina(self, etapas_menu: list[str], menu_timeout: int) -> None:
         """Tenta abrir novamente cada etapa do menu antes de desistir da rotina."""
         tentativas_menu = int(CONFIG.get("MenuRetries", 3))
+        transicao_timeout = min(
+            menu_timeout,
+            int(CONFIG.get("MenuStepTimeout", 15000)),
+        )
+        clique_timeout = transicao_timeout
         ultimo_erro: Exception | None = None
 
         for tentativa in range(1, tentativas_menu + 1):
+            indice_retorno = 0
             try:
                 logger.info(
                     "Tentativa %d de %d para acessar o menu: %s",
@@ -732,17 +741,26 @@ class ProtheusPlaywrightMainFlow:
                     f"Tentativa {tentativa} de {tentativas_menu}: acessando menu da rotina"
                 )
                 for indice, etapa in enumerate(etapas_menu):
-                    self._esperar_e_clicar(etapa, timeout=menu_timeout)
+                    try:
+                        self._esperar_e_clicar(etapa, timeout=clique_timeout)
+                    except (PlaywrightTimeoutError, PlaywrightError):
+                        indice_retorno = max(0, indice - 1)
+                        raise
                     if indice < len(etapas_menu) - 1:
-                        self._aguardar_item_visivel(etapas_menu[indice + 1], timeout=menu_timeout)
+                        try:
+                            self._aguardar_item_visivel(
+                                etapas_menu[indice + 1],
+                                timeout=transicao_timeout,
+                            )
+                        except (PlaywrightTimeoutError, PlaywrightError):
+                            indice_retorno = indice
+                            raise
                 logger.info("Menu da rotina acessado com sucesso na tentativa %d", tentativa)
                 return
             except (PlaywrightTimeoutError, PlaywrightError) as error:
                 ultimo_erro = error
-                if tentativa == tentativas_menu:
-                    break
                 logger.warning(
-                    "Falha ao acessar o menu na tentativa %d; tentando Movimento/Pedidos novamente: %s",
+                    "Falha ao acessar o menu na tentativa %d; iniciando recuperação reversa: %s",
                     tentativa,
                     error,
                 )
@@ -754,8 +772,56 @@ class ProtheusPlaywrightMainFlow:
                 self._atualizar_acao(
                     "Falha no menu; tentando novamente Movimento e Pedidos de Compra"
                 )
-                self.page.keyboard.press("Escape")
-                sleep(2)
+
+                recuperado = False
+                for indice_base in range(indice_retorno, -1, -1):
+                    etapa_base = etapas_menu[indice_base]
+                    try:
+                        logger.info(
+                            "Verificando predecessor do menu: '%s'",
+                            etapa_base,
+                        )
+                        self._aguardar_item_visivel(
+                            etapa_base,
+                            timeout=min(menu_timeout, 3000),
+                        )
+                        logger.info(
+                            "Predecessor '%s' visível; clicando novamente",
+                            etapa_base,
+                        )
+                        self._esperar_e_clicar(
+                            etapa_base,
+                            timeout=clique_timeout,
+                        )
+
+                        for indice_retomada in range(indice_base + 1, len(etapas_menu)):
+                            self._aguardar_item_visivel(
+                                etapas_menu[indice_retomada],
+                                timeout=transicao_timeout,
+                            )
+                            self._esperar_e_clicar(
+                                etapas_menu[indice_retomada],
+                                timeout=transicao_timeout,
+                            )
+
+                        logger.info(
+                            "Menu recuperado a partir do predecessor '%s'",
+                            etapa_base,
+                        )
+                        recuperado = True
+                        break
+                    except (PlaywrightTimeoutError, PlaywrightError) as recovery_error:
+                        ultimo_erro = recovery_error
+                        logger.warning(
+                            "Predecessor '%s' não está disponível; tentando o anterior",
+                            etapa_base,
+                        )
+
+                if recuperado:
+                    return
+
+                if tentativa == tentativas_menu:
+                    break
 
         raise PlaywrightError(
             f"Nao foi possivel acessar o menu da rotina apos {tentativas_menu} tentativas: {ultimo_erro}"
@@ -910,13 +976,18 @@ class ProtheusPlaywrightMainFlow:
 #
 #
 #########################################################################################################
-def exec_playwright_from_main(headless_override: bool | None = None) -> bool:
+def exec_playwright_from_main(
+    headless_override: bool | None = None,
+    _login_retry_attempted: bool = False,
+    _execution_retry_count: int = 0,
+) -> bool:
     mfa_obtido = False
     logger.info("Versao do fluxo Playwright: %s", BUILD_VERSION)
     cronometro = LogBanco.CronometroExecucao(acao_inicial="INICIANDO EXECUCAO PLAYWRIGHT")
     cronometro.iniciar()
     status_final = "NAO"
     descricao_final = "FINALIZANDO EXECUCAO"
+    login_retry_requested = False
 
     try:
         # Configurações específicas para o Firefox
@@ -997,7 +1068,9 @@ def exec_playwright_from_main(headless_override: bool | None = None) -> bool:
                         wait_ms=5000,
                     )
 
-                cronometro.atualizar_acao(fr"Executando rotina {MENU_LATERAL}")
+                cronometro.atualizar_acao(
+                    fr"Executando fluxo configurado: {CONFIG.get('Fluxo', '')}"
+                )
                 cronometro.atualizar_acao(fr"Aguardando elemento atual... ")
                 flow.executar_rotina_teste(cronometro)
 
@@ -1005,6 +1078,10 @@ def exec_playwright_from_main(headless_override: bool | None = None) -> bool:
                 cronometro.atualizar_acao("Execução do fluxo principal do Playwright concluida")
                 return mfa_obtido
             except Exception as e:
+                login_retry_requested = (
+                    cronometro.obter_acao()
+                    == "Iframe de login encontrado; preenchendo usuário"
+                )
                 status_final = "SIM"
                 erro_resumido = " ".join(str(e).split())
                 descricao_final = f"ERRO DURANTE EXECUCAO PLAYWRIGHT: {erro_resumido}"
@@ -1019,9 +1096,45 @@ def exec_playwright_from_main(headless_override: bool | None = None) -> bool:
                     browser.close()
                 total = cronometro.finalizar(status_final=status_final, descricao_final=descricao_final)
                 logger.info("Cronometro finalizado em %ss", total)
+                if status_final == "NAO":
+                    try:
+                        media_resultado = LogBanco.resultado(LogBanco.id_execucao)
+                        limite_alerta = media_resultado * 1.3
+                        if media_resultado > 0 and total > limite_alerta:
+                            logger.warning(
+                                "Tempo de execução acima da média: %ss; média %.2fs; limite %.2fs",
+                                total,
+                                media_resultado,
+                                limite_alerta,
+                            )
+                            enviar_temp_exc(total, media_resultado)
+                    except Exception:
+                        logger.exception("Não foi possível calcular a média ou enviar o alerta de tempo")
                 LogBanco.salvar()
     except Exception as global_err:
         logger.exception("Erro crítico no gerenciador do Playwright: %s", global_err)
+        if login_retry_requested and not _login_retry_attempted:
+            logger.warning(
+                "Fluxo interrompido no preenchimento do usuário do iframe; "
+                "reiniciando uma única vez"
+            )
+            return exec_playwright_from_main(
+                headless_override=headless_override,
+                _login_retry_attempted=True,
+            )
+        execution_retries = int(CONFIG.get("ExecutionRetries", 2))
+        if isinstance(global_err, PlaywrightError) and _execution_retry_count < execution_retries:
+            proxima_tentativa = _execution_retry_count + 1
+            logger.warning(
+                "Falha Playwright transitória; reiniciando o fluxo completo "
+                "(tentativa %d de %d)",
+                proxima_tentativa,
+                execution_retries,
+            )
+            return exec_playwright_from_main(
+                headless_override=headless_override,
+                _execution_retry_count=proxima_tentativa,
+            )
         enviar_erro_execucao(
             global_err,
             cronometro.obter_acao(),
