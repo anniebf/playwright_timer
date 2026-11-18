@@ -146,6 +146,25 @@ class CronometroExecucao:
 
             self._stop_event.wait(1)
 
+    def registrar_rotina(self, nome: str, segundos: float, sucesso: bool) -> None:
+        """Grava uma linha com o tempo de UMA rotina (TEMPO_EXECUCAO = segundos da rotina).
+
+        A descrição começa com 'Rotina' e não com 'Finalizando execução', para não
+        entrar no cálculo da média em resultado().
+        """
+        decorrido = int(time.monotonic() - self._inicio_monotonic) if self._inicio_monotonic else 0
+        status = 'NAO' if sucesso else 'ERRO'
+        situacao = 'concluída' if sucesso else 'com erro'
+        registrar_timer(
+            self.id_execucao,
+            formatar_descricao(status, f"Rotina '{nome}' {situacao} em {segundos:.1f}s", decorrido),
+            sistema,
+            usuario,
+            status,
+            int(round(segundos)),
+            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        )
+
     def finalizar(self, status_final: str = 'NAO', descricao_final: str = 'FINALIZANDO EXECUCAO') -> int:
         self._stop_event.set()
         with self._lock:

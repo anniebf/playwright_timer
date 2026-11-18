@@ -121,7 +121,33 @@ Crie o arquivo com esta estrutura. Substitua os valores pelos dados do ambiente:
 | `StartProgram` | booleano | Nao | Mantido para compatibilidade; nao controla diretamente o fluxo atual. |
 | `Fluxo` | string | Sim | Etapas separadas por `>`, localizadas e acionadas na ordem informada. Use `sair` para fechar a tela da rotina. |
 
-`Fluxo` e a unica rota usada pela automacao e deve ser informado no `config.json`.
+### Uma ou mais rotinas sem alterar codigo
+
+Use a lista `Rotinas` no `config.json` (tem prioridade sobre `Fluxo`, que continua aceito para uma rotina so). Cada item pode ser texto ou objeto com `Nome`:
+
+```json
+"Rotinas": [
+  { "Nome": "Pedidos de Compra", "Fluxo": "Compras > Movimento > Pedidos de Compra > Visualizar > Cancelar > sair" },
+  "Faturamento > Consultas > Notas Fiscais > sair"
+]
+```
+
+Ou informe pela linha de comando (prioridade maxima; repita `--fluxo` para varias):
+
+```bash
+python main_playwright.py --fluxo "Compras > Movimento > Pedidos de Compra > sair" --fluxo "Faturamento > Consultas > Notas Fiscais > sair"
+# no Docker, sobrescreva o comando ou use o config.json montado por volume
+```
+
+Login, MFA e empresa/filial acontecem uma unica vez; cada rotina e cronometrada separadamente e o tempo sai em:
+
+- log final (`Resumo dos tempos por rotina`);
+- `RPA.TIMER`: uma linha `Rotina '<nome>' concluida em Ns` com `TEMPO_EXECUCAO` = segundos da rotina;
+- `log_playwright/tempos_rotinas_<id_execucao>.json`.
+
+Dicas: termine cada caminho com `sair` (se nao terminar, o robo tenta fechar a tela fora do tempo medido, com timeout `FecharRotinaTimeout`, padrao 10000 ms). Se uma rotina falhar, as seguintes continuam; no final o erro e propagado (e-mail e `ExecutionRetries` como antes).
+
+Testes do parser de rotinas: `python -m unittest discover -s tests -v`
 
 O codigo aceita valores booleanos reais no JSON, por exemplo `true` e `false`. Para `Headless`, tambem sao reconhecidos textos como `true`, `false`, `1`, `0`, `yes` e `no`.
 

@@ -1,3 +1,21 @@
+"""
+main_playwright.py - Cronômetro de rotinas do Protheus (Playwright + TOTVS WebAgent).
+
+LÓGICA GERAL
+------------
+1. Abre o Protheus, preenche parâmetros iniciais, faz login, MFA e empresa/filial
+   UMA única vez.
+2. Executa, em sequência, cada rotina configurada (uma ou mais). As rotinas vêm de
+   --fluxo na linha de comando ou de "Rotinas"/"Fluxo" no config.json
+   (ver rotinas.py). Nenhuma alteração de código é necessária para trocar rotinas.
+3. Cada rotina é cronometrada separadamente (time.monotonic). O tempo vai para:
+   - o log (resumo no final);
+   - a tabela RPA.TIMER (uma linha por rotina);
+   - log_playwright/tempos_rotinas_<id_execucao>.json.
+4. Se uma rotina falhar, ela é registrada como erro, a tela é fechada e a próxima
+   rotina continua. No final, havendo falhas, o erro é propagado para manter o
+   comportamento antigo (e-mail de erro e novas tentativas).
+"""
 import argparse
 import json
 import os
@@ -24,6 +42,8 @@ from MandaEmail import enviar_erro_base_selenium, enviar_erro_execucao, enviar_t
 import graph
 import LogBanco
 import logging_config
+import rotinas as rotinas_cfg
+from rotinas import Rotina, ResultadoRotina
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -60,6 +80,13 @@ def _build_args() -> argparse.Namespace:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--headless", action="store_true", help="Executa sem abrir a janela do navegador")
     mode.add_argument("--headed", action="store_true", help="Executa com a janela do navegador visivel")
+    # Cada --fluxo é uma rotina. Se informado, tem prioridade sobre o config.json.
+    parser.add_argument(
+        "--fluxo",
+        action="append",
+        metavar='"A > B > sair"',
+        help="Caminho de uma rotina (pode repetir para várias rotinas)",
+    )
     return parser.parse_args()
 
 
@@ -669,39 +696,69 @@ class ProtheusPlaywrightMainFlow:
             cronometro.atualizar_acao("MFA nao apareceu %s" % etapa)
         return confirmado
 
-    # função principal que executa a rotina de teste, acessando o menu lateral e realizando ações de validação
-    def executar_rotina_teste(self,cronometro, max_retries: int = 3) -> None:
-        fluxo_configurado = CONFIG.get("Fluxo")
-        if not isinstance(fluxo_configurado, str) or not fluxo_configurado.strip():
-            raise ValueError("A configuração precisa definir 'Fluxo'.")
-
-        etapas_fluxo = [
-            parte.strip()
-            for parte in fluxo_configurado.split(">")
-            if parte.strip()
-        ]
-        logger.info("Executando fluxo configurado: %s", " > ".join(etapas_fluxo))
-        cronometro.atualizar_acao(
-            "Executando fluxo configurado: %s" % " > ".join(etapas_fluxo)
-        )
-        # força a atualização do estado do menu antes de tentar acessar a rotina
+    # função principal: executa todas as rotinas configuradas, cronometrando cada uma
+    def executar_rotinas(self, cronometro, lista_rotinas: list[Rotina]) -> list[ResultadoRotina]:
+        """Executa as rotinas em sequência na mesma sessão e devolve o tempo de cada uma."""
+        resultados: list[ResultadoRotina] = []
+        total = len(lista_rotinas)
+        # força a atualização do estado do menu antes de tentar acessar a primeira rotina
         self._registrar_estado_menu()
+
+        for indice_rotina, rotina in enumerate(lista_rotinas, start=1):
+            logger.info("Rotina %d/%d '%s': %s", indice_rotina, total, rotina.nome, rotina.caminho)
+            cronometro.atualizar_acao(f"Rotina {indice_rotina}/{total} iniciada: {rotina.nome}")
+
+            # O cronômetro da rotina mede apenas os cliques do caminho informado.
+            inicio_rotina = monotonic()
+            try:
+                self._executar_etapas(cronometro, rotina, indice_rotina, total)
+                segundos = monotonic() - inicio_rotina
+                resultado = ResultadoRotina(rotina.nome, rotina.caminho, round(segundos, 2), True)
+            except (PlaywrightTimeoutError, PlaywrightError) as error:
+                segundos = monotonic() - inicio_rotina
+                erro_resumido = " ".join(str(error).split())[:300]
+                logger.error("Rotina '%s' falhou após %.1fs: %s", rotina.nome, segundos, erro_resumido)
+                resultado = ResultadoRotina(rotina.nome, rotina.caminho, round(segundos, 2), False, erro_resumido)
+                # Fecha o que ficou aberto para a próxima rotina começar do menu.
+                self.page.keyboard.press("Escape")
+                sleep(1)
+                self._fechar_rotina_atual()
+
+            resultados.append(resultado)
+            cronometro.registrar_rotina(resultado.nome, resultado.segundos, resultado.sucesso)
+
+            # Se o caminho não termina em 'sair' e ainda há rotinas, fecha a tela
+            # FORA do tempo medido (não faz parte do caminho informado).
+            if resultado.sucesso and indice_rotina < total and not rotina.termina_com_saida:
+                self._fechar_rotina_atual()
+
+        return resultados
+
+    # executa as etapas de UMA rotina, na ordem informada
+    def _executar_etapas(self, cronometro, rotina: Rotina, indice_rotina: int, total_rotinas: int) -> None:
+        etapas_fluxo = list(rotina.etapas)
         menu_timeout = int(CONFIG.get("MenuTimeout", 60000))
         rotina_timeout = int(CONFIG.get("RotinaTimeout", 90000))
+
+        # A partir da 2ª rotina o menu pode continuar expandido (ex.: "Compras" já aberto).
+        # Clicar de novo recolheria o menu, então pulamos as etapas iniciais enquanto a
+        # etapa SEGUINTE já estiver visível. Na primeira etapa realmente clicada, paramos de pular.
+        pode_pular_expandidas = indice_rotina > 1
+
         for indice, etapa in enumerate(etapas_fluxo, start=1):
             etapa_normalizada = etapa.casefold()
             timeout = rotina_timeout if indice > 1 else menu_timeout
-            logger.info(
-                "Etapa %d/%d do fluxo: '%s'",
-                indice,
-                len(etapas_fluxo),
-                etapa,
-            )
-            cronometro.atualizar_acao(
-                "Etapa %d/%d: procurando '%s'" % (indice, len(etapas_fluxo), etapa)
-            )
+            prefixo = f"Rotina {indice_rotina}/{total_rotinas} - Etapa {indice}/{len(etapas_fluxo)}"
+            logger.info("%s do fluxo: '%s'", prefixo, etapa)
+            cronometro.atualizar_acao(f"{prefixo}: procurando '{etapa}'")
 
-            if etapa_normalizada in {"sair", "fechar", "fechar tela"}:
+            if pode_pular_expandidas and indice < len(etapas_fluxo):
+                if self._item_visivel_rapido(etapas_fluxo[indice]):
+                    logger.info("%s: '%s' já está expandido; etapa pulada", prefixo, etapa)
+                    continue
+                pode_pular_expandidas = False
+
+            if etapa_normalizada in rotinas_cfg.ETAPAS_SAIDA:
                 seletor_saida = "wa-button#COMP6014 button"
                 self._esperar_e_clicar(seletor_saida, timeout=timeout)
             else:
@@ -709,13 +766,31 @@ class ProtheusPlaywrightMainFlow:
 
             nome_etapa = re.sub(r"[^A-Za-z0-9_-]+", "_", etapa).strip("_") or f"etapa_{indice}"
             self.page.screenshot(
-                path=str(LogBanco.LOG_DIR / f"fluxo_{indice:02d}_{nome_etapa}.png"),
+                path=str(LogBanco.LOG_DIR / f"fluxo_r{indice_rotina:02d}_{indice:02d}_{nome_etapa}.png"),
                 full_page=True,
             )
-            cronometro.atualizar_acao(
-                "Etapa %d/%d concluída: '%s'" % (indice, len(etapas_fluxo), etapa)
+            cronometro.atualizar_acao(f"{prefixo} concluída: '{etapa}'")
+            sleep(1)
+
+    # verifica rapidamente (sem esperar o timeout longo) se um item do menu está visível
+    def _item_visivel_rapido(self, texto: str, timeout: int = 1000) -> bool:
+        try:
+            self._aguardar_item_visivel(texto, timeout=timeout)
+            return True
+        except (PlaywrightTimeoutError, PlaywrightError):
+            return False
+
+    # tenta fechar a tela da rotina atual (botão de saída); ignora se não existir
+    def _fechar_rotina_atual(self) -> None:
+        try:
+            self._esperar_e_clicar(
+                "wa-button#COMP6014 button",
+                timeout=int(CONFIG.get("FecharRotinaTimeout", 10000)),
+                pressionar_escape_ao_falhar=False,
             )
             sleep(1)
+        except (PlaywrightTimeoutError, PlaywrightError):
+            logger.info("Botão de saída não encontrado; seguindo para a próxima rotina")
 
     # função auxiliar para garantir que a tela de pedidos esteja pronta antes de prosseguir
     def _acessar_menu_rotina(self, etapas_menu: list[str], menu_timeout: int) -> None:
@@ -978,9 +1053,13 @@ class ProtheusPlaywrightMainFlow:
 #########################################################################################################
 def exec_playwright_from_main(
     headless_override: bool | None = None,
+    fluxos_cli: list[str] | None = None,
     _login_retry_attempted: bool = False,
     _execution_retry_count: int = 0,
 ) -> bool:
+    # Valida as rotinas ANTES de abrir o navegador (falha rápida se a config estiver errada).
+    lista_rotinas = rotinas_cfg.carregar_rotinas(CONFIG, fluxos_cli)
+    logger.info("Rotinas a cronometrar: %s", [r.nome for r in lista_rotinas])
     mfa_obtido = False
     logger.info("Versao do fluxo Playwright: %s", BUILD_VERSION)
     cronometro = LogBanco.CronometroExecucao(acao_inicial="INICIANDO EXECUCAO PLAYWRIGHT")
@@ -1068,11 +1147,19 @@ def exec_playwright_from_main(
                         wait_ms=5000,
                     )
 
-                cronometro.atualizar_acao(
-                    fr"Executando fluxo configurado: {CONFIG.get('Fluxo', '')}"
-                )
-                cronometro.atualizar_acao(fr"Aguardando elemento atual... ")
-                flow.executar_rotina_teste(cronometro)
+                cronometro.atualizar_acao(f"Executando {len(lista_rotinas)} rotina(s) configurada(s)")
+                resultados = flow.executar_rotinas(cronometro, lista_rotinas)
+
+                # Entrega dos tempos: log + arquivo JSON em log_playwright/
+                logger.info(rotinas_cfg.formatar_resumo(resultados))
+                relatorio = rotinas_cfg.salvar_relatorio(resultados, LogBanco.LOG_DIR, LogBanco.id_execucao)
+                logger.info("Relatório de tempos salvo em %s", relatorio)
+
+                falhas = [r for r in resultados if not r.sucesso]
+                if falhas:
+                    raise PlaywrightError(
+                        "Rotina(s) com falha: " + "; ".join(f"{r.nome}: {r.erro}" for r in falhas)
+                    )
 
                 logger.info("Execução do fluxo principal do Playwright concluida")
                 cronometro.atualizar_acao("Execução do fluxo principal do Playwright concluida")
@@ -1120,6 +1207,7 @@ def exec_playwright_from_main(
             )
             return exec_playwright_from_main(
                 headless_override=headless_override,
+                fluxos_cli=fluxos_cli,
                 _login_retry_attempted=True,
             )
         execution_retries = int(CONFIG.get("ExecutionRetries", 2))
@@ -1133,6 +1221,7 @@ def exec_playwright_from_main(
             )
             return exec_playwright_from_main(
                 headless_override=headless_override,
+                fluxos_cli=fluxos_cli,
                 _execution_retry_count=proxima_tentativa,
             )
         enviar_erro_execucao(
@@ -1150,7 +1239,7 @@ if __name__ == "__main__":
         elif args.headless:
             override = True
 
-        exec_playwright_from_main(headless_override=override)
+        exec_playwright_from_main(headless_override=override, fluxos_cli=args.fluxo)
     except Exception as e:
         logger.critical("Ocorreu um erro fatal que interrompeu o script: %s", e, exc_info=True)
         sys.exit(1)
