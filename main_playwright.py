@@ -5,17 +5,22 @@ LÓGICA GERAL
 ------------
 1. Lê as rotinas (uma ou mais) de --fluxo ou de "Rotinas"/"Fluxo" no config.json
    (ver rotinas.py). Trocar rotinas não exige alterar código.
-2. As rotinas rodam UMA DE CADA VEZ, e cada uma em uma SESSÃO NOVA: abre o
-   navegador, faz login, MFA e empresa/filial, executa o caminho e fecha o navegador.
-3. O código MFA só é aceito se o e-mail chegou DEPOIS do clique em "Entrar" da
-   sessão atual (evita reutilizar o código do login da rotina anterior).
-4. O tempo de cada rotina mede só os cliques do caminho (sem login). Ele vai para:
-   - o log geral (resumo no final) e um log só da rotina em log_playwright/rotinas/;
-   - a tabela RPA.TIMER (cada rotina com seu próprio ID_EXECUCAO);
+2. LOGIN ÚNICO: abre o navegador, acessa a URL, faz login, MFA e empresa/filial
+   uma única vez. Esse trecho é cronometrado como "Login".
+3. Para cada rotina, na mesma sessão:
+   a) executa o caminho (menu > rotina > ações) - cronometrado individualmente;
+   b) volta para a tela principal (fora do tempo medido): fecha a tela da rotina
+      e confirma que o menu (1ª etapa do caminho) está visível de novo.
+4. Os tempos (Login, Rotina 1, Rotina 2, ...) vão para:
+   - o log geral (resumo no final) e um log de cada item em log_playwright/rotinas/;
+   - a tabela RPA.TIMER (linhas "Tempo Login: Ns", "Tempo Rotina 'X': Ns");
    - log_playwright/tempos_rotinas_<id>.json.
-5. Falhas, por rotina: novas tentativas (ExecutionRetries) e e-mail de erro; uma
-   rotina com falha não impede as próximas.
-6. Erro conhecido "Excedeu numero de licenças" (janela TOTVS): é reconhecido na tela,
+5. Falhas:
+   - no login: novas tentativas da execução inteira (ExecutionRetries) e e-mail;
+   - em uma rotina: e-mail de erro, a rotina fica marcada com erro e a próxima segue;
+     se não for possível voltar à tela principal, as rotinas restantes são marcadas
+     como não executadas.
+6. Erro conhecido "Excedeu numero de licenças" (janela TOTVS): reconhecido na tela,
    vira LicencaExcedidaError (erros_protheus.py), tem descrição e e-mail próprios e
    NÃO entra nas novas tentativas.
 """
@@ -54,7 +59,7 @@ BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
 
 logger = logging_config.get_logger("main_playwright_from_main")
-BUILD_VERSION = "2026-11-18-rotinas-sequenciais"
+BUILD_VERSION = "2026-11-18-login-unico-rotinas"
 # Intervalo (s) entre verificações da janela de licença enquanto espera um elemento.
 INTERVALO_VERIFICACAO_LICENCA = 3
 
@@ -744,11 +749,81 @@ class ProtheusPlaywrightMainFlow:
             cronometro.atualizar_acao("MFA nao apareceu %s" % etapa)
         return confirmado
 
+    # executa todas as rotinas na mesma sessão, cronometrando cada uma e voltando à tela principal
+    def executar_rotinas(self, cronometro, lista_rotinas: list[Rotina]) -> list[ResultadoRotina]:
+        resultados: list[ResultadoRotina] = []
+        total = len(lista_rotinas)
+        tela_principal_ok = True
+
+        for indice, rotina in enumerate(lista_rotinas, start=1):
+            # Sem a tela principal não há como abrir a próxima rotina pelo menu.
+            if not tela_principal_ok:
+                logger.error("Rotina '%s' não executada: tela principal não foi recuperada", rotina.nome)
+                resultados.append(ResultadoRotina(
+                    rotina.nome, rotina.caminho, 0.0, False,
+                    "NAO EXECUTADA: tela principal não foi recuperada após a rotina anterior",
+                ))
+                continue
+
+            handler = logging_config.iniciar_log_da_rotina(indice, LogBanco.id_execucao, rotina.nome)
+            try:
+                logger.info("Rotina %d/%d '%s': %s", indice, total, rotina.nome, rotina.caminho)
+                cronometro.atualizar_acao(f"Rotina {indice}/{total} iniciada: {rotina.nome}")
+
+                # ---- tempo da rotina: só os cliques do caminho ----
+                inicio = monotonic()
+                try:
+                    self.executar_rotina(cronometro, rotina, indice, total)
+                    resultado = ResultadoRotina(rotina.nome, rotina.caminho, round(monotonic() - inicio, 2), True)
+                except Exception as erro:
+                    resultado = self._tratar_falha_rotina(cronometro, rotina, erro, monotonic() - inicio)
+                # ---- fim do tempo da rotina ----
+
+                logger.info("Tempo da rotina '%s': %.1fs (%s)", rotina.nome, resultado.segundos,
+                            "OK" if resultado.sucesso else resultado.erro)
+                cronometro.registrar_tempo(f"Rotina '{rotina.nome}'", resultado.segundos, resultado.sucesso)
+                resultados.append(resultado)
+
+                # Volta para a tela principal (fora do tempo medido).
+                ja_fechou = resultado.sucesso and rotina.termina_com_saida
+                tela_principal_ok = self.voltar_tela_principal(cronometro, rotina, ja_fechou)
+            finally:
+                logging_config.encerrar_log_da_rotina(handler)
+
+        return resultados
+
+    # registra a falha de uma rotina (erro de licença tem tratamento próprio) e devolve o resultado
+    def _tratar_falha_rotina(self, cronometro, rotina: Rotina, erro: Exception, segundos: float) -> ResultadoRotina:
+        # Um timeout qualquer pode ter sido causado pela janela de licença: confere a tela.
+        if not isinstance(erro, LicencaExcedidaError):
+            try:
+                self.verificar_licenca()
+            except LicencaExcedidaError as erro_licenca:
+                erro = erro_licenca
+            except Exception:
+                pass
+
+        if isinstance(erro, LicencaExcedidaError):
+            logger.error("Rotina '%s': %s", rotina.nome, erro)
+            enviar_erro_licenca(rotina.nome, cronometro.obter_acao())
+            self._fechar_dialogo()  # botão "Fechar" da janela TOTVS
+            return ResultadoRotina(rotina.nome, rotina.caminho, round(segundos, 2), False, DESCRICAO_LICENCA)
+
+        erro_resumido = " ".join(str(erro).split())[:300]
+        logger.exception("Rotina '%s' falhou após %.1fs: %s", rotina.nome, segundos, erro_resumido)
+        enviar_erro_execucao(erro, cronometro.obter_acao())
+        return ResultadoRotina(rotina.nome, rotina.caminho, round(segundos, 2), False, erro_resumido)
+
     # executa as etapas de UMA rotina, na ordem informada no caminho
     def executar_rotina(self, cronometro, rotina: Rotina, indice_rotina: int, total_rotinas: int) -> None:
         etapas_fluxo = list(rotina.etapas)
         menu_timeout = int(CONFIG.get("MenuTimeout", 60000))
         rotina_timeout = int(CONFIG.get("RotinaTimeout", 90000))
+
+        # A partir da 2ª rotina o menu pode continuar expandido (ex.: "Compras" já aberto).
+        # Clicar de novo RECOLHERIA o menu; então, enquanto a etapa SEGUINTE já estiver
+        # visível, a etapa atual é pulada. Depois do primeiro clique real, não pula mais.
+        pode_pular_expandidas = indice_rotina > 1
 
         for indice, etapa in enumerate(etapas_fluxo, start=1):
             # A primeira etapa (menu) usa MenuTimeout; as demais, RotinaTimeout.
@@ -756,6 +831,12 @@ class ProtheusPlaywrightMainFlow:
             prefixo = f"Rotina {indice_rotina}/{total_rotinas} - Etapa {indice}/{len(etapas_fluxo)}"
             logger.info("%s do fluxo: '%s'", prefixo, etapa)
             cronometro.atualizar_acao(f"{prefixo}: procurando '{etapa}'")
+
+            if pode_pular_expandidas and indice < len(etapas_fluxo):
+                if self._item_visivel_rapido(etapas_fluxo[indice]):
+                    logger.info("%s: '%s' já está expandido no menu; etapa pulada", prefixo, etapa)
+                    continue
+                pode_pular_expandidas = False
 
             if etapa.casefold() in rotinas_cfg.ETAPAS_SAIDA:
                 # 'sair'/'fechar' = botão de fechar a tela da rotina
@@ -770,6 +851,68 @@ class ProtheusPlaywrightMainFlow:
             )
             cronometro.atualizar_acao(f"{prefixo} concluída: '{etapa}'")
             sleep(1)
+
+    # fecha a tela da rotina e confirma que o menu principal voltou a aparecer
+    def voltar_tela_principal(self, cronometro, rotina: Rotina, ja_fechou: bool) -> bool:
+        """Retorna True quando a 1ª etapa do caminho (ex.: o módulo 'Compras') está visível no menu."""
+        tentativas = int(CONFIG.get("VoltarTelaTentativas", 3))
+        espera_ms = int(CONFIG.get("VoltarTelaTimeout", 15000))
+        item_menu = rotina.etapas[0]
+        inicio = monotonic()
+        cronometro.atualizar_acao(f"Voltando para a tela principal após '{rotina.nome}'")
+
+        for tentativa in range(1, tentativas + 1):
+            # Se o caminho já terminou em 'sair' com sucesso, a 1ª tentativa só confere o menu.
+            if not (ja_fechou and tentativa == 1):
+                self._fechar_dialogo()
+                self._fechar_rotina_atual()
+            if self._item_visivel_rapido(item_menu, timeout=espera_ms):
+                logger.info("Tela principal recuperada em %.1fs (tentativa %d)", monotonic() - inicio, tentativa)
+                cronometro.atualizar_acao("Tela principal recuperada")
+                return True
+            logger.warning("Menu '%s' ainda não visível; tentativa %d de %d", item_menu, tentativa, tentativas)
+
+        logger.error("Não foi possível voltar para a tela principal após '%s'", rotina.nome)
+        try:
+            self.page.screenshot(
+                path=str(LogBanco.LOG_DIR / f"tela_principal_perdida_{int(monotonic() * 1000)}.png"),
+                full_page=True,
+            )
+        except PlaywrightError:
+            pass
+        return False
+
+    # verifica rapidamente (sem esperar o timeout longo) se um item do menu está visível
+    def _item_visivel_rapido(self, texto: str, timeout: int = 1000) -> bool:
+        try:
+            self._aguardar_item_visivel(texto, timeout=timeout)
+            return True
+        except (PlaywrightTimeoutError, PlaywrightError):
+            return False
+
+    # tenta fechar a tela da rotina atual (botão de saída); ignora se não existir
+    def _fechar_rotina_atual(self) -> None:
+        try:
+            self._esperar_e_clicar(
+                "wa-button#COMP6014 button",
+                timeout=int(CONFIG.get("FecharRotinaTimeout", 10000)),
+                pressionar_escape_ao_falhar=False,
+            )
+            sleep(1)
+        except (PlaywrightTimeoutError, PlaywrightError):
+            logger.info("Botão de saída da rotina não encontrado")
+
+    # clica em "Fechar" de uma janela de mensagem do Protheus, se houver
+    def _fechar_dialogo(self) -> None:
+        for frame in list(self.page.frames):
+            try:
+                botao = frame.get_by_role("button", name="Fechar", exact=True).first
+                if botao.count() and botao.is_visible():
+                    botao.click(timeout=3000)
+                    sleep(0.5)
+                    return
+            except PlaywrightError:
+                continue
 
     # função auxiliar para garantir que a tela de pedidos esteja pronta antes de prosseguir
     def _acessar_menu_rotina(self, etapas_menu: list[str], menu_timeout: int) -> None:
@@ -1025,38 +1168,28 @@ class ProtheusPlaywrightMainFlow:
     
 #########################################################################################################
 #
-# Executa UMA rotina em uma sessão própria: abre navegador, login, MFA, empresa/filial,
-# caminho da rotina e fecha o navegador. Chamada uma vez para cada rotina.
+# Função principal: login único, depois cada rotina na mesma sessão, com tempos individuais.
 #
 #########################################################################################################
-def executar_rotina_isolada(
-    rotina: Rotina,
-    indice_rotina: int,
-    total_rotinas: int,
+def exec_playwright_from_main(
     headless_override: bool | None = None,
-    _id_execucao: int | None = None,
+    fluxos_cli: list[str] | None = None,
     _login_retry_attempted: bool = False,
     _execution_retry_count: int = 0,
-) -> ResultadoRotina:
-    # Cada rotina tem seu próprio ID no RPA.TIMER; as novas tentativas reaproveitam o mesmo ID.
-    id_execucao = _id_execucao or LogBanco.nova_execucao_id()
-    logger.info(
-        "Rotina %d/%d '%s' iniciando (id_execucao=%s, versao=%s)",
-        indice_rotina, total_rotinas, rotina.nome, id_execucao, BUILD_VERSION,
-    )
-    cronometro = LogBanco.CronometroExecucao(
-        acao_inicial=f"INICIANDO ROTINA {rotina.nome}",
-        id_exec=id_execucao,
-    )
+) -> bool:
+    # Valida as rotinas ANTES de abrir o navegador (falha rápida se a config estiver errada).
+    lista_rotinas = rotinas_cfg.carregar_rotinas(CONFIG, fluxos_cli)
+    logger.info("Versao do fluxo Playwright: %s", BUILD_VERSION)
+    logger.info("Rotinas a cronometrar (%d): %s", len(lista_rotinas), [r.nome for r in lista_rotinas])
+
+    cronometro = LogBanco.CronometroExecucao(acao_inicial="INICIANDO EXECUCAO PLAYWRIGHT")
     cronometro.iniciar()
     status_final = "NAO"
     descricao_final = "FINALIZANDO EXECUCAO"
     login_retry_requested = False
-    inicio_rotina: float | None = None
-    flow: ProtheusPlaywrightMainFlow | None = None
+    resultados: list[ResultadoRotina] = []
 
     try:
-        # Sessão nova: Playwright e navegador próprios para esta rotina.
         with sync_playwright() as playwright:
 
             firefox_prefs = {
@@ -1071,6 +1204,7 @@ def executar_rotina_isolada(
                 headless = _parse_bool(CONFIG.get("Headless", True), default=True)
 
             browser: Browser | None = None
+            flow: ProtheusPlaywrightMainFlow | None = None
             try:
                 cronometro.atualizar_acao("Abrindo navegador")
                 browser = browser_type.launch(
@@ -1084,68 +1218,82 @@ def executar_rotina_isolada(
                 page = context.new_page()
                 flow = ProtheusPlaywrightMainFlow(page, cronometro)
 
-                cronometro.atualizar_acao("Acessando URL do Protheus")
+                # ================= LOGIN (cronometrado como "Login") =================
+                handler_login = logging_config.iniciar_log_da_rotina(0, LogBanco.id_execucao, "Login")
+                inicio_login = monotonic()
                 try:
-                    flow.abrir()
-                except PlaywrightTimeoutError as error:
-                    logger.error("Falha de conexao ou timeout ao acessar %s: %s", CONFIG.get("Url"), error, exc_info=True)
-                    cronometro.atualizar_acao("Falha de conexao ou timeout ao acessar URL do Protheus; enviando email de base offline")
+                    cronometro.atualizar_acao("Acessando URL do Protheus")
                     try:
-                        enviar_erro_base_selenium()
-                    except Exception as email_err:
-                        logger.exception("Falha adicional ao tentar enviar o e-mail de base offline: %s", email_err)
-                        cronometro.atualizar_acao("Falha adicional ao tentar enviar o e-mail de base offline")
+                        flow.abrir()
+                    except PlaywrightTimeoutError as error:
+                        logger.error("Falha de conexao ou timeout ao acessar %s: %s", CONFIG.get("Url"), error, exc_info=True)
+                        cronometro.atualizar_acao("Falha de conexao ou timeout ao acessar URL do Protheus; enviando email de base offline")
+                        try:
+                            enviar_erro_base_selenium()
+                        except Exception as email_err:
+                            logger.exception("Falha adicional ao tentar enviar o e-mail de base offline: %s", email_err)
+                            cronometro.atualizar_acao("Falha adicional ao tentar enviar o e-mail de base offline")
 
-                    status_final = "ERRO"
-                    descricao_final = "ERRO AO ACESSAR URL DO PROTHEUS"
-                    return ResultadoRotina(rotina.nome, rotina.caminho, 0.0, False, descricao_final)
+                        status_final = "ERRO"
+                        descricao_final = "ERRO AO ACESSAR URL DO PROTHEUS"
+                        return False
 
-                cronometro.atualizar_acao("Iniciando funcao para parâmetros iniciais...")
-                flow.selecionar_parametros_iniciais(cronometro)
+                    cronometro.atualizar_acao("Iniciando funcao para parâmetros iniciais...")
+                    flow.selecionar_parametros_iniciais(cronometro)
 
-                cronometro.atualizar_acao("Iniciando funcao para fechar tela de tamanho se existir...")
-                flow.fechar_tela_tamanho_se_existir(cronometro)
+                    cronometro.atualizar_acao("Iniciando funcao para fechar tela de tamanho se existir...")
+                    flow.fechar_tela_tamanho_se_existir(cronometro)
 
-                # ---- Login -> MFA -> empresa/filial (sessão nova a cada rotina) ----
-                cronometro.atualizar_acao("iniciando funcao de Login...")
-                flow.fazer_login(cronometro)
-                flow.verificar_licenca()  # a janela de licença costuma aparecer logo após o login
-                logger.info("Login realizado com sucesso")
-                cronometro.atualizar_acao("Login realizado com sucesso")
+                    cronometro.atualizar_acao("iniciando funcao de Login...")
+                    flow.fazer_login(cronometro)
+                    flow.verificar_licenca()  # a janela de licença costuma aparecer logo após o login
+                    logger.info("Login realizado com sucesso")
+                    cronometro.atualizar_acao("Login realizado com sucesso")
 
-                cronometro.atualizar_acao("Iniciando validacao de MFA antes de preencher grupo/filial...")
-                mfa_obtido = flow.confirmar_mfa_se_existir(cronometro, "antes de preencher grupo/filial")
+                    cronometro.atualizar_acao("Iniciando validacao de MFA antes de preencher grupo/filial...")
+                    mfa_obtido = flow.confirmar_mfa_se_existir(cronometro, "antes de preencher grupo/filial")
 
-                cronometro.atualizar_acao("Iniciando funcao para preencher empresa/filial...")
-                empresa_filial_ok = flow.preencher_empresa_filial(cronometro)
-                flow.verificar_licenca()
-                if not empresa_filial_ok:
-                    raise PlaywrightError(
-                        "A etapa de empresa/filial não foi concluída; menu da rotina não será acessado"
-                    )
+                    cronometro.atualizar_acao("Iniciando funcao para preencher empresa/filial...")
+                    empresa_filial_ok = flow.preencher_empresa_filial(cronometro)
+                    flow.verificar_licenca()
+                    if not empresa_filial_ok:
+                        raise PlaywrightError(
+                            "A etapa de empresa/filial não foi concluída; menu da rotina não será acessado"
+                        )
 
-                mfa_obtido = mfa_obtido or flow.mfa_confirmado
-                if not mfa_obtido:
-                    cronometro.atualizar_acao("Iniciando funcao de verificar MFA depois de preencher grupo/filial...")
-                    flow.confirmar_mfa_se_existir(
-                        cronometro,
-                        "depois de preencher grupo/filial",
-                        wait_ms=5000,
-                    )
+                    mfa_obtido = mfa_obtido or flow.mfa_confirmado
+                    if not mfa_obtido:
+                        cronometro.atualizar_acao("Iniciando funcao de verificar MFA depois de preencher grupo/filial...")
+                        flow.confirmar_mfa_se_existir(
+                            cronometro,
+                            "depois de preencher grupo/filial",
+                            wait_ms=5000,
+                        )
 
-                cronometro.atualizar_acao(f"Executando rotina: {rotina.caminho}")
+                    segundos_login = monotonic() - inicio_login
+                    logger.info("Tempo de login: %.1fs", segundos_login)
+                finally:
+                    logging_config.encerrar_log_da_rotina(handler_login)
+
+                resultados.append(ResultadoRotina(
+                    "Login", "URL > parâmetros > login > MFA > empresa/filial", round(segundos_login, 2), True
+                ))
+                cronometro.registrar_tempo("Login", segundos_login, True)
+                # ================= fim do LOGIN =================
+
+                # ============ ROTINAS (cada uma cronometrada, voltando à tela principal) ============
                 flow._registrar_estado_menu()
-                # O tempo da rotina mede apenas os cliques do caminho (sem login).
-                inicio_rotina = monotonic()
-                flow.executar_rotina(cronometro, rotina, indice_rotina, total_rotinas)
-                segundos = monotonic() - inicio_rotina
-                cronometro.registrar_rotina(rotina.nome, segundos, True)
+                resultados.extend(flow.executar_rotinas(cronometro, lista_rotinas))
 
-                logger.info("Rotina '%s' concluída em %.1fs", rotina.nome, segundos)
-                cronometro.atualizar_acao("Execução da rotina concluida")
-                return ResultadoRotina(rotina.nome, rotina.caminho, round(segundos, 2), True)
+                falhas = [r.nome for r in resultados if not r.sucesso]
+                if falhas:
+                    status_final = "SIM"
+                    descricao_final = "ERRO EM ROTINA(S): " + ", ".join(falhas)
+                logger.info("Execução concluida (%d rotina(s), %d com erro)", len(lista_rotinas), len(falhas))
+                cronometro.atualizar_acao("Execução do fluxo principal do Playwright concluida")
+                return not falhas
             except Exception as e:
-                # Um timeout qualquer pode ter sido causado pela janela de licença: confere a tela.
+                # Um timeout no login pode ter sido causado pela janela de licença: confere a tela.
                 erro = e
                 if not isinstance(e, LicencaExcedidaError) and flow is not None:
                     try:
@@ -1158,7 +1306,6 @@ def executar_rotina_isolada(
                 status_final = "SIM"
                 erro_resumido = " ".join(str(erro).split())
                 if isinstance(erro, LicencaExcedidaError):
-                    login_retry_requested = False
                     descricao_final = DESCRICAO_LICENCA
                 else:
                     login_retry_requested = (
@@ -1166,11 +1313,11 @@ def executar_rotina_isolada(
                         == "Iframe de login encontrado; preenchendo usuário"
                     )
                     descricao_final = f"ERRO DURANTE EXECUCAO PLAYWRIGHT: {erro_resumido}"
-                logger.exception("Exceção na rotina '%s': %s", rotina.nome, e)
-                if inicio_rotina is not None:
-                    cronometro.registrar_rotina(rotina.nome, monotonic() - inicio_rotina, False)
+                logger.exception("Exceção não tratada capturada na execução do fluxo principal: %s", e)
                 cronometro.marcar_erro()
-                cronometro.atualizar_acao(f"Exceção não tratada na rotina: {erro_resumido}")
+                cronometro.atualizar_acao(
+                    f"Exceção não tratada capturada na execução do fluxo principal: {erro_resumido}"
+                )
                 if erro is e:
                     raise
                 raise erro from e
@@ -1178,10 +1325,10 @@ def executar_rotina_isolada(
                 if browser is not None:
                     browser.close()
                 total = cronometro.finalizar(status_final=status_final, descricao_final=descricao_final)
-                logger.info("Cronometro da rotina '%s' finalizado em %ss", rotina.nome, total)
+                logger.info("Cronometro finalizado em %ss", total)
                 if status_final == "NAO":
                     try:
-                        media_resultado = LogBanco.resultado(id_execucao)
+                        media_resultado = LogBanco.resultado(LogBanco.id_execucao)
                         limite_alerta = media_resultado * 1.3
                         if media_resultado > 0 and total > limite_alerta:
                             logger.warning(
@@ -1193,90 +1340,49 @@ def executar_rotina_isolada(
                             enviar_temp_exc(total, media_resultado)
                     except Exception:
                         logger.exception("Não foi possível calcular a média ou enviar o alerta de tempo")
+
+                # Entrega dos tempos (Login, Rotina 1, ...): log + JSON, mesmo se algo falhou.
+                if resultados:
+                    logger.info(rotinas_cfg.formatar_resumo(resultados))
+                    relatorio = rotinas_cfg.salvar_relatorio(resultados, LogBanco.LOG_DIR, LogBanco.id_execucao)
+                    logger.info("Relatório de tempos salvo em %s", relatorio)
+                LogBanco.salvar()
     except Exception as global_err:
         if isinstance(global_err, LicencaExcedidaError):
-            logger.error("Rotina '%s' não executada: %s", rotina.nome, global_err)
-            enviar_erro_licenca(rotina.nome, cronometro.obter_acao())
-            return ResultadoRotina(rotina.nome, rotina.caminho, 0.0, False, DESCRICAO_LICENCA)
-        logger.exception("Erro na rotina '%s': %s", rotina.nome, global_err)
+            # Sem licença não adianta tentar de novo na hora: avisa e encerra.
+            logger.error("Execução não realizada: %s", global_err)
+            enviar_erro_licenca("Login (nenhuma rotina executada)", cronometro.obter_acao())
+            return False
+        logger.exception("Erro crítico no gerenciador do Playwright: %s", global_err)
         if login_retry_requested and not _login_retry_attempted:
-            logger.warning("Rotina '%s' interrompida no login; reiniciando uma única vez", rotina.nome)
-            return executar_rotina_isolada(
-                rotina, indice_rotina, total_rotinas,
+            logger.warning(
+                "Fluxo interrompido no preenchimento do usuário do iframe; "
+                "reiniciando uma única vez"
+            )
+            return exec_playwright_from_main(
                 headless_override=headless_override,
-                _id_execucao=id_execucao,
+                fluxos_cli=fluxos_cli,
                 _login_retry_attempted=True,
             )
         execution_retries = int(CONFIG.get("ExecutionRetries", 2))
         if isinstance(global_err, PlaywrightError) and _execution_retry_count < execution_retries:
             proxima_tentativa = _execution_retry_count + 1
             logger.warning(
-                "Falha Playwright na rotina '%s'; nova sessão (tentativa %d de %d)",
-                rotina.nome, proxima_tentativa, execution_retries,
+                "Falha Playwright transitória; reiniciando o fluxo completo "
+                "(tentativa %d de %d)",
+                proxima_tentativa,
+                execution_retries,
             )
-            return executar_rotina_isolada(
-                rotina, indice_rotina, total_rotinas,
+            return exec_playwright_from_main(
                 headless_override=headless_override,
-                _id_execucao=id_execucao,
+                fluxos_cli=fluxos_cli,
                 _execution_retry_count=proxima_tentativa,
             )
-        enviar_erro_execucao(global_err, cronometro.obter_acao())
-        erro_resumido = " ".join(str(global_err).split())[:300]
-        return ResultadoRotina(rotina.nome, rotina.caminho, 0.0, False, erro_resumido)
-
-
-# abre o log exclusivo da rotina, executa a rotina e fecha o log
-def _executar_rotina_com_log(
-    rotina: Rotina,
-    indice_rotina: int,
-    total_rotinas: int,
-    headless_override: bool | None = None,
-) -> ResultadoRotina:
-    # O ID é gerado aqui para já aparecer no nome do arquivo de log;
-    # as novas tentativas da rotina caem no mesmo arquivo.
-    id_execucao = LogBanco.nova_execucao_id()
-    handler = logging_config.iniciar_log_da_rotina(indice_rotina, id_execucao, rotina.nome)
-    logger.info("Log da rotina '%s' em %s", rotina.nome, handler.baseFilename)
-    try:
-        return executar_rotina_isolada(
-            rotina, indice_rotina, total_rotinas,
-            headless_override=headless_override,
-            _id_execucao=id_execucao,
+        enviar_erro_execucao(
+            global_err,
+            cronometro.obter_acao(),
         )
-    finally:
-        logging_config.encerrar_log_da_rotina(handler)
-
-
-#########################################################################################################
-#
-# Função principal: executa as rotinas uma de cada vez (cada uma em sessão nova) e consolida os tempos.
-#
-#########################################################################################################
-def exec_playwright_from_main(
-    headless_override: bool | None = None,
-    fluxos_cli: list[str] | None = None,
-) -> bool:
-    # Valida as rotinas ANTES de abrir qualquer navegador (falha rápida se a config estiver errada).
-    lista_rotinas = rotinas_cfg.carregar_rotinas(CONFIG, fluxos_cli)
-    total = len(lista_rotinas)
-    logger.info("Rotinas a cronometrar (%d, em sequência): %s", total, [r.nome for r in lista_rotinas])
-
-    resultados: list[ResultadoRotina] = []
-    for indice, rotina in enumerate(lista_rotinas, start=1):
-        try:
-            resultados.append(_executar_rotina_com_log(rotina, indice, total, headless_override))
-        except Exception as erro:  # proteção: um erro inesperado não impede as próximas rotinas
-            logger.exception("Erro inesperado na rotina '%s': %s", rotina.nome, erro)
-            resultados.append(ResultadoRotina(
-                rotina.nome, rotina.caminho, 0.0, False, " ".join(str(erro).split())[:300]
-            ))
-
-    # Entrega dos tempos: log + JSON. O log geral vai para o banco uma vez, no final.
-    logger.info(rotinas_cfg.formatar_resumo(resultados))
-    relatorio = rotinas_cfg.salvar_relatorio(resultados, LogBanco.LOG_DIR, LogBanco.id_execucao)
-    logger.info("Relatório de tempos salvo em %s", relatorio)
-    LogBanco.salvar()
-    return all(r.sucesso for r in resultados)
+        return False
 
 if __name__ == "__main__":
     try:

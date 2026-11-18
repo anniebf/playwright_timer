@@ -37,31 +37,20 @@ dsn = os.getenv('dsn')
 usuario = os.getenv('usuario')
 
 
-# Protege a leitura/gravação do idExec.json: com threads, duas rotinas poderiam
-# ler o mesmo número antes de uma delas gravar o próximo.
-_id_lock = Lock()
-
-
 def _next_execution_id() -> int:
-    with _id_lock:
-        if not ID_EXEC_PATH.exists():
-            ID_EXEC_PATH.write_text('{"id_execucao": 1}', encoding='utf-8')
+    if not ID_EXEC_PATH.exists():
+        ID_EXEC_PATH.write_text('{"id_execucao": 1}', encoding='utf-8')
 
-        with ID_EXEC_PATH.open('r', encoding='utf-8') as fileid:
-            dadosid = json.load(fileid)
+    with ID_EXEC_PATH.open('r', encoding='utf-8') as fileid:
+        dadosid = json.load(fileid)
 
-        id_atual = int(dadosid.get('id_execucao', 1))
-        dadosid['id_execucao'] = id_atual + 1
+    id_atual = int(dadosid.get('id_execucao', 1))
+    dadosid['id_execucao'] = id_atual + 1
 
-        with ID_EXEC_PATH.open('w', encoding='utf-8') as fileid:
-            json.dump(dadosid, fileid, indent=4)
+    with ID_EXEC_PATH.open('w', encoding='utf-8') as fileid:
+        json.dump(dadosid, fileid, indent=4)
 
-        return id_atual
-
-
-def nova_execucao_id() -> int:
-    """Gera um novo ID_EXECUCAO (thread-safe) para cada rotina executada em paralelo."""
-    return _next_execution_id()
+    return id_atual
 
 id_execucao = _next_execution_id()
     
@@ -87,9 +76,8 @@ def formatar_descricao(nivel: str, mensagem: str, segundos: int | None = None) -
 class CronometroExecucao:
     """Registra no banco o andamento da execução a cada segundo."""
 
-    def __init__(self, acao_inicial: str = 'ABRINDO NAVEGADOR', status_padrao: str = 'NAO', id_exec: int | None = None):
-        # Sem id_exec usa o ID global do módulo (comportamento antigo); com threads, cada rotina passa o seu.
-        self.id_execucao = id_exec if id_exec is not None else id_execucao
+    def __init__(self, acao_inicial: str = 'ABRINDO NAVEGADOR', status_padrao: str = 'NAO'):
+        self.id_execucao = id_execucao
         self.status_padrao = status_padrao
         self._status_atual = status_padrao
         self._acao_atual = acao_inicial
@@ -158,18 +146,19 @@ class CronometroExecucao:
 
             self._stop_event.wait(1)
 
-    def registrar_rotina(self, nome: str, segundos: float, sucesso: bool) -> None:
-        """Grava uma linha com o tempo de UMA rotina (TEMPO_EXECUCAO = segundos da rotina).
+    def registrar_tempo(self, item: str, segundos: float, sucesso: bool) -> None:
+        """Grava uma linha com o tempo de UM item da execução (o login ou uma rotina).
 
-        A descrição começa com 'Rotina' e não com 'Finalizando execução', para não
-        entrar no cálculo da média em resultado().
+        TEMPO_EXECUCAO recebe os segundos do item. A descrição começa com 'Tempo',
+        e não com 'Finalizando execução', para não entrar na média de resultado().
+        Ex.: "[0042s] - Tempo Login: 35.2s" / "[0055s] - Tempo Rotina 'Pedidos': 12.3s (com erro)"
         """
         decorrido = int(time.monotonic() - self._inicio_monotonic) if self._inicio_monotonic else 0
         status = 'NAO' if sucesso else 'ERRO'
-        situacao = 'concluída' if sucesso else 'com erro'
+        sufixo = '' if sucesso else ' (com erro)'
         registrar_timer(
             self.id_execucao,
-            formatar_descricao(status, f"Rotina '{nome}' {situacao} em {segundos:.1f}s", decorrido),
+            formatar_descricao(status, f"Tempo {item}: {segundos:.1f}s{sufixo}", decorrido),
             sistema,
             usuario,
             status,

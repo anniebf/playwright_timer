@@ -4,7 +4,7 @@ rotinas.py - Leitura e relatório das rotinas a cronometrar no Protheus.
 LÓGICA GERAL
 ------------
 O cronômetro deixa de ter um único caminho fixo. Agora ele recebe UMA OU MAIS
-rotinas e mede o tempo de cada uma separadamente, na mesma sessão logada.
+rotinas e, depois de um login único, mede o tempo de cada uma separadamente.
 
 As rotinas podem vir de três lugares (em ordem de prioridade):
 

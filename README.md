@@ -139,16 +139,28 @@ python main_playwright.py --fluxo "Compras > Movimento > Pedidos de Compra > sai
 # no Docker, sobrescreva o comando ou use o config.json montado por volume
 ```
 
-As rotinas rodam **uma de cada vez**, cada uma em uma **sessao nova**: abre o navegador, faz login, MFA e empresa/filial, executa o caminho e fecha o navegador.
+Fluxo da execucao: **login unico** e depois cada rotina na mesma sessao.
+
+```text
+Login (URL > parametros > login > MFA > empresa/filial)   -> tempo "Login"
+Rotina 1: caminho do menu e acoes                         -> tempo "Rotina 1"
+          volta para a tela principal (fora do tempo)
+Rotina 2: ...                                             -> tempo "Rotina 2"
+```
 
 | Parametro | Padrao | Funcao |
 |---|---|---|
 | `MfaTimeout` | `60000` | Tempo (ms) aguardando o e-mail do MFA da sessao. |
+| `VoltarTelaTimeout` | `15000` | Tempo (ms) esperando o menu reaparecer depois de fechar a rotina. |
+| `VoltarTelaTentativas` | `3` | Tentativas de fechar a rotina e voltar para a tela principal. |
+| `FecharRotinaTimeout` | `10000` | Tempo (ms) procurando o botao de sair da rotina. |
 
-- O codigo MFA so e aceito se o e-mail chegou depois do clique em "Entrar" da sessao atual (nao reaproveita o codigo da rotina anterior).
-- O tempo de cada rotina mede so os cliques do caminho (sem login) e sai em: log final (`Resumo dos tempos por rotina`), `RPA.TIMER` (cada rotina com seu proprio `ID_EXECUCAO`) e `log_playwright/tempos_rotinas_<id>.json`. 
-- Logs: `log_playwright/*.log` continua com tudo (e e o que vai para o banco); cada rotina tem tambem um arquivo so dela em `log_playwright/rotinas/<data>_r<NN>_<id_execucao>_<nome>.log`.
-- Falha em uma rotina nao para as outras; as novas tentativas (`ExecutionRetries`) e o e-mail de erro valem por rotina.
+- **Tempos**: log final (`Resumo dos tempos por rotina`, comecando pelo Login), `RPA.TIMER` (linhas `Tempo Login: Ns` e `Tempo Rotina '<nome>': Ns`, com `TEMPO_EXECUCAO` = segundos do item, todas com o mesmo `ID_EXECUCAO`) e `log_playwright/tempos_rotinas_<id>.json`.
+- **Tela principal**: depois de cada rotina o robo clica em sair (se o caminho nao terminou em `sair`) e confirma que a 1a etapa do caminho (o modulo, ex.: `Compras`) esta visivel no menu.
+- **Menu expandido**: a partir da 2a rotina, etapas iniciais cujo submenu ja esta aberto sao puladas (clicar de novo recolheria o menu).
+- **Logs**: `log_playwright/*.log` tem tudo (e e o que vai para o banco); `log_playwright/rotinas/` tem um arquivo para o login (`r00`) e um para cada rotina.
+- **Falhas**: no login, a execucao inteira e repetida (`ExecutionRetries`); em uma rotina, ela fica com erro (e-mail enviado) e a proxima segue. Se nao der para voltar a tela principal, as rotinas restantes ficam como `NAO EXECUTADA`.
+- O codigo MFA so e aceito se o e-mail chegou depois do clique em "Entrar" da sessao atual.
 - Janela TOTVS **"Excedeu numero de licencas"**: reconhecida na tela (inclusive enquanto o robo espera um elemento), gravada como `ERRO LICENCA PROTHEUS` no `RPA.TIMER`, gera e-mail proprio e **nao** entra nas novas tentativas.
 
 Testes do parser de rotinas: `python -m unittest discover -s tests -v`
