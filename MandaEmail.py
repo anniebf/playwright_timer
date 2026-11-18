@@ -25,7 +25,7 @@ Environment = dados.get("Environment", "Não informado")
 destinatarios = ["WILSON.PALHARES@bomfuturo.com.br", "hianny.urt@bomfuturo.com.br",
                 "felipe.assis@bomfuturo.com.br","MARCEL.RODRIGUES@bomfuturo.com.br","sherman.vendramini@bomfuturo.com.br"]
 
-#destinatarios = ["hianny.urt@bomfuturo.com.br"]
+destinatarioAnnie = ["hianny.urt@bomfuturo.com.br"]
 
 def enviar_warning(DESC):
 
@@ -145,14 +145,14 @@ def enviar_erro_execucao(erro, etapa, detalhes=None):
 
         message = MIMEMultipart()
         message["From"] = sender_mail
-        message["To"] = ", ".join(destinatarios)
+        message["To"] = ", ".join(destinatarioAnnie)
         message["Subject"] = subject
         message.attach(MIMEText(body, "html"))
 
         with smtplib.SMTP(server_smtp, port) as server:
             server.starttls()
             server.login(sender_mail, password)
-            server.sendmail(sender_mail, destinatarios, message.as_string())
+            server.sendmail(sender_mail, destinatarioAnnie, message.as_string())
         logger.info('Email detalhado de falha de execução enviado com sucesso')
     except Exception as email_error:
         logger.error('Ocorreu um erro ao enviar o email detalhado de execução: %s', email_error)
