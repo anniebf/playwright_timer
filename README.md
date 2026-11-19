@@ -38,8 +38,8 @@ Uma execução faz **um login só** e, na mesma sessão, passa por cada rotina, 
 │   → usuário/senha → MFA (código lido do e-mail) → empresa/filial     │
 ├──────────────────────────────────────────────────────────────────────┤
 │ ROTINA 1  (cronometrada)                                             │
-│   menu: Compras > Movimento > Pedidos de Compra                      │
-│   ações: Visualizar > Cancelar > sair                                │
+│   Menu:  Compras > Movimento > Pedidos de Compra                     │
+│   Acoes: clicar Visualizar, clicar Cancelar, clicar sair             │
 │   volta para a tela principal (fora do tempo medido)                 │
 ├──────────────────────────────────────────────────────────────────────┤
 │ ROTINA 2 ... ROTINA N  (idem)                                        │
@@ -97,7 +97,7 @@ Responsabilidade de cada módulo, em uma frase:
 | Módulo | O que faz |
 |---|---|
 | `main_playwright.py` | Orquestra tudo. A classe `ProtheusPlaywrightMainFlow` sabe "mexer" no Protheus (login, menu, cliques confirmados); `exec_playwright_from_main()` amarra login → rotinas → resultados. |
-| `rotinas.py` | Converte `"Compras > Movimento > ..."` em etapas, valida a configuração e grava `tempos_rotinas_<id>.json`. |
+| `rotinas.py` | Lê as rotinas do `config.json` (`Menu` + `Acoes`, ou o `Fluxo` antigo), valida cada ação e grava `tempos_rotinas_<id>.json`. |
 | `LogBanco.py` | `CronometroExecucao` grava no `RPA.TIMER` o andamento (1 linha/segundo), o tempo de cada item (`Tempo Login`, `Tempo Rotina`) e o fim da execução. |
 | `mapa_calor.py` | Lê as linhas `Tempo ...` do banco, calcula o "normal" de cada rotina, monta o detalhe de uma execução e gera `mapa_calor.html`. |
 | `api_mapa.py` | Serviço web (FastAPI) que entrega o mapa de calor lendo o banco a cada acesso. |
@@ -146,8 +146,8 @@ Obrigatórios: `Url`, `User`, `Password` e as rotinas (`Rotinas` ou `Fluxo`). O 
 
 | Chave | O que faz |
 |---|---|
-| `Rotinas` | Lista de rotinas a cronometrar (formato recomendado). |
-| `Fluxo` | Formato antigo: uma rotina só, em texto. Usado apenas se `Rotinas` não existir. |
+| `Rotinas` | Lista de rotinas a cronometrar, cada uma com `Nome`, `Menu` e `Acoes` (ver 4.2). |
+| `Fluxo` | Formato antigo: uma rotina só, em texto (tudo é clique). Usado apenas se `Rotinas` não existir. |
 
 **Login** (tempos em ms, exceto `TimeOut`)
 
@@ -188,33 +188,69 @@ Obrigatórios: `Url`, `User`, `Password` e as rotinas (`Rotinas` ou `Fluxo`). O 
 
 > Chaves antigas como `Language`, `DebugLog`, `POUILogin`, `LogFolder`, `LogFile` e `StartProgram` podem continuar no arquivo, mas **não são usadas**.
 
-### 4.2 Rotinas — como descrever o caminho
+### 4.2 Rotinas — como descrever o que o robô faz
 
-Cada rotina é um **caminho** com as etapas separadas por `>`, na ordem em que um usuário clicaria:
+Cada rotina tem duas partes, separadas:
 
-```text
- Compras  >  Movimento  >  Pedidos de Compra  >  Visualizar  >  Cancelar  >  sair
-└──────── menu (pastas) ───┘ └─ abre a rotina ─┘ └────── ações na tela da rotina ──────┘
-```
+- **`Menu`** — o caminho no menu do Protheus **até abrir a rotina**, com os itens separados por `>`;
+- **`Acoes`** — a lista do que fazer **dentro da rotina**, uma ação por linha, na ordem.
 
 ```json
 "Rotinas": [
-    { "Nome": "Pedidos de Compra",    "Fluxo": "Compras > Movimento > Pedidos de Compra > Visualizar > Cancelar > sair" },
-    { "Nome": "Documento de entrada", "Fluxo": "Fiscal > Movimento > Documento Entrada > Visualizar > Cancelar > sair" },
-    "Faturamento > Consultas > Notas Fiscais > sair"
+    {
+        "Nome": "Pedidos de Compra",
+        "Menu": "Compras > Movimento > Pedidos de Compra",
+        "Acoes": [
+            { "clicar": "Visualizar" },
+            { "clicar": "Cancelar" },
+            { "clicar": "sair" }
+        ]
+    },
+    {
+        "Nome": "Documento de entrada",
+        "Menu": "Fiscal > Movimento > Documento Entrada",
+        "Acoes": [
+            { "clicar": "Visualizar" },
+            { "clicar": "Cancelar" },
+            { "clicar": "sair" }
+        ]
+    }
 ]
 ```
 
-Regras:
+**Tipos de ação:**
 
-1. **Use o texto exato do menu, sem o contador.** No menu aparece `Compras (7)` → escreva `Compras`. Maiúsculas/minúsculas e espaços extras não importam.
-2. **Comece pelo módulo da raiz do menu** (`Compras`, `Fiscal`, `Faturamento`...) e desça pasta por pasta até a rotina.
-3. **Depois da rotina, escreva as ações** com o texto do botão (`Visualizar`, `Cancelar`, `Alterar`...). Cada ação só é clicada quando a anterior teve efeito.
-4. **Termine com `sair`** (ou `fechar`) para fechar a tela da rotina. Se não terminar, o robô fecha sozinho, fora do tempo medido.
-5. **`Nome` é opcional**: é como a rotina aparece no log, no banco e no mapa. Sem ele, o próprio caminho vira o nome. **Não troque o nome de uma rotina já em uso** — o histórico (e o "normal" do mapa de calor) é agrupado por nome.
-6. A ordem da lista é a ordem de execução.
+| Ação | Exemplo | O que o robô faz |
+|---|---|---|
+| `clicar` | `{ "clicar": "Visualizar" }` | Espera o botão/texto aparecer, faz a pausa `PausaAntesAcao` e clica. `"sair"` ou `"fechar"` = botão de fechar a tela da rotina. |
+| `duplo` | `{ "duplo": "000123" }` | Igual, com clique duplo (ex.: abrir uma linha da lista). |
+| `tecla` | `{ "tecla": "Enter" }` | Faz a pausa e aperta a tecla no que estiver em foco. Ex.: `Enter`, `Tab`, `Escape`, `F3`, `F5`, `ArrowDown`, `Control+A`. |
+| `esperar` | `{ "esperar": "000123" }` | **Não clica**: espera aparecer na tela um texto que **contenha** esse valor. Serve para medir quanto o Protheus demora a responder (ex.: o resultado de uma pesquisa). |
+| `digitar` | — | **Ainda não disponível** (depende de mapear como o WebApp identifica cada campo). Usar dá erro já na leitura do `config.json`. |
 
-Para testar uma rotina sem editar o `config.json`, passe-a na linha de comando (tem prioridade sobre o arquivo; repita `--fluxo` para várias):
+Atalho: uma ação pode ser só o texto — `"Visualizar"` é o mesmo que `{ "clicar": "Visualizar" }`.
+
+**Como o robô executa:**
+
+1. **Menu:** cada item é procurado **dentro do item anterior** na árvore do menu (assim `Compras > Movimento` e `Fiscal > Movimento` nunca se confundem). Pastas já abertas não são clicadas. O último item precisa **abrir a rotina** — se ele for uma pasta, ou se a rotina abrir antes do fim do `Menu`, o robô para com uma mensagem dizendo o que corrigir.
+2. **Ações:** em ordem. Depois de um `clicar`/`duplo`, o robô confirma que a ação seguinte apareceu; se não apareceu e o botão continua na tela (clique ignorado pelo Protheus), clica de novo (`AcaoRetries`).
+3. **Tempo da rotina:** do primeiro clique no menu até a última ação. A volta para a tela principal fica fora.
+
+**Regras:**
+
+1. **Use o texto exato do menu e dos botões, sem o contador.** No menu aparece `Compras (7)` → escreva `Compras`. Maiúsculas/minúsculas e espaços extras não importam.
+2. **Termine as ações com `{ "clicar": "sair" }`** para fechar a tela da rotina. Se não terminar, o robô fecha sozinho, fora do tempo medido.
+3. **`Nome` é opcional**: é como a rotina aparece no log, no banco e no mapa. Sem ele, vale o último item do `Menu` (ex.: `Pedidos de Compra`). **Não troque o nome de uma rotina já em uso** — o histórico (e o "normal" do mapa de calor) é agrupado por nome.
+4. **Use só rotinas de consulta** (visualizar, pesquisar, cancelar). O robô roda de hora em hora em produção: nunca coloque ações que confirmem, salvem, incluam ou excluam dados.
+5. A ordem da lista é a ordem de execução. `Acoes` pode ficar vazio: o robô só abre a rotina e fecha.
+
+**Formato antigo (continua funcionando):** um caminho único em texto, em que tudo é clique e o robô descobre sozinho onde o menu termina:
+
+```json
+{ "Nome": "Documento de entrada", "Fluxo": "Fiscal > Movimento > Documento Entrada > Visualizar > Cancelar > sair" }
+```
+
+Para testar uma rotina sem editar o `config.json`, passe-a na linha de comando nesse formato (tem prioridade sobre o arquivo; repita `--fluxo` para várias):
 
 ```powershell
 python main_playwright.py --headed --fluxo "Compras > Movimento > Pedidos de Compra > Visualizar > Cancelar > sair"
@@ -502,6 +538,10 @@ Para testar uma rotina nova de ponta a ponta, rode com `--headed` e `--fluxo` (v
 
 | Sintoma no log | Causa provável / o que fazer |
 |---|---|
+| `O Menu terminou em 'X', que é uma pasta` | O último item do `Menu` precisa ser a rotina; complete o caminho. |
+| `'X' já abriu a rotina; 'Y' deve ir em Acoes` | O `Menu` tem itens demais: mova os itens depois da rotina para `Acoes`. |
+| `Rotina #N, ação #M: ...` (ao iniciar) | Erro de digitação no `config.json` (ação desconhecida, tecla inválida, `digitar`...). A mensagem diz o que corrigir. |
+| `'X' não apareceu na tela dentro de Nms` | Uma ação `esperar` não encontrou o texto: a tela não respondeu ou o texto está diferente. Veja o `timeout_*.png`. |
 | `Item 'X' não encontrado dentro de 'Y'` | O texto da etapa não bate com o menu (confira no Protheus, sem o contador) ou o usuário não tem acesso à rotina. |
 | `Item 'X' do menu foi clicado 2x, mas a rotina não abriu` | Protheus lento ou travado; aumente `RotinaAbrirTimeout` / `MenuRetries`. |
 | `Clique em 'Visualizar' não teve efeito ... clicando de novo` | Tela ainda carregando; o robô se recupera. Se for frequente, aumente `PausaAntesAcao`. |

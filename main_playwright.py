@@ -29,7 +29,7 @@ import LogBanco
 import logging_config
 import mapa_calor
 import rotinas as rotinas_cfg
-from rotinas import Rotina, ResultadoRotina
+from rotinas import Acao, Rotina, ResultadoRotina
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -907,52 +907,115 @@ class ProtheusPlaywrightMainFlow:
         enviar_erro_execucao(erro, cronometro.obter_acao())
         return ResultadoRotina(rotina.nome, rotina.caminho, round(segundos, 2), False, erro_resumido)
 
-    # executa as etapas de UMA rotina, na ordem informada no caminho
+    # executa UMA rotina: navega o Menu até abri-la e depois faz as Acoes, em ordem
     def executar_rotina(self, cronometro, rotina: Rotina, indice_rotina: int, total_rotinas: int) -> None:
-        etapas_fluxo = list(rotina.etapas)
         rotina_timeout = int(CONFIG.get("RotinaTimeout", 90000))
+        total_etapas = len(rotina.menu) + len(rotina.acoes)
 
-        # 1) Etapas do menu: percorridas pela árvore (até abrir a rotina).
-        etapas_menu = self._navegar_menu(cronometro, rotina, indice_rotina, total_rotinas)
+        # 1) Menu: percorrido pela árvore do WebApp até abrir a rotina.
+        if rotina.menu:
+            # Formato padrão: o Menu é exatamente o caminho até a rotina.
+            usadas, abriu = self._navegar_menu(cronometro, list(rotina.menu), indice_rotina, total_rotinas, total_etapas)
+            if not abriu:
+                raise PlaywrightError(
+                    f"O Menu terminou em '{rotina.menu[-1]}', que é uma pasta: o último item do Menu "
+                    "precisa ser a rotina (ex.: '... > Pedidos de Compra')"
+                )
+            if usadas < len(rotina.menu):
+                raise PlaywrightError(
+                    f"'{rotina.menu[usadas - 1]}' já abriu a rotina; '{rotina.menu[usadas]}' "
+                    "deve ir em Acoes, não no Menu"
+                )
+            acoes = list(rotina.acoes)
+        else:
+            # Formato antigo (Fluxo): as etapas iniciais que existirem no menu são do menu.
+            usadas, _ = self._navegar_menu(cronometro, [a.alvo for a in rotina.acoes],
+                                           indice_rotina, total_rotinas, total_etapas)
+            acoes = list(rotina.acoes[usadas:])
 
-        # 2) Demais etapas: ações dentro da tela da rotina (Visualizar, Cancelar, sair...).
-        for indice in range(etapas_menu + 1, len(etapas_fluxo) + 1):
-            etapa = etapas_fluxo[indice - 1]
-            timeout = rotina_timeout
-            prefixo = f"Rotina {indice_rotina}/{total_rotinas} - Etapa {indice}/{len(etapas_fluxo)}"
-            logger.info("%s do fluxo: '%s'", prefixo, etapa)
-            cronometro.atualizar_acao(f"{prefixo}: procurando '{etapa}'")
+        # 2) Ações dentro da tela da rotina (clicar, duplo, tecla, esperar).
+        for posicao, acao in enumerate(acoes):
+            indice = total_etapas - len(acoes) + posicao + 1
+            prefixo = f"Rotina {indice_rotina}/{total_rotinas} - Etapa {indice}/{total_etapas}"
+            logger.info("%s do fluxo: '%s'", prefixo, acao.descricao)
+            cronometro.atualizar_acao(f"{prefixo}: {acao.descricao}")
 
-            # Espera o botão aparecer e dá uma pausa curta antes de clicar: com a tela ainda
-            # carregando, o Protheus ignora o clique (ex.: "Visualizar" logo após abrir a rotina).
-            # A pausa é fixa, então entra igual em todas as medições.
-            pausa_ms = int(CONFIG.get("PausaAntesAcao", 2000))
-            if pausa_ms > 0:
-                if not self._etapa_visivel(etapa, timeout=timeout):
-                    try:
-                        nome_print = re.sub(r"[^A-Za-z0-9_-]+", "_", etapa).strip("_")
-                        self.page.screenshot(
-                            path=str(LogBanco.LOG_DIR / f"timeout_{nome_print}_{int(monotonic() * 1000)}.png"),
-                            full_page=True,
-                        )
-                    except PlaywrightError:
-                        pass
-                    raise PlaywrightTimeoutError(f"Elemento '{etapa}' não foi encontrado dentro de {timeout}ms")
-                sleep(pausa_ms / 1000)
-            self._esperar_e_clicar(self._alvo_da_etapa(etapa), timeout=timeout)
+            self._executar_acao(acao, rotina_timeout)
 
-            # Confirma que o clique teve efeito: a PRÓXIMA etapa precisa aparecer.
+            # Confirma que o clique teve efeito: a PRÓXIMA ação com alvo na tela precisa aparecer.
             # (Ex.: clicar em "Visualizar" com a lista ainda carregando é ignorado pelo Protheus.)
-            if indice < len(etapas_fluxo):
-                self._garantir_proxima_etapa(etapa, etapas_fluxo[indice])
+            proxima = acoes[posicao + 1] if posicao + 1 < len(acoes) else None
+            if acao.tipo in ("clicar", "duplo") and proxima and proxima.tem_alvo_na_tela:
+                self._garantir_proxima_etapa(acao, proxima)
 
-            nome_etapa = re.sub(r"[^A-Za-z0-9_-]+", "_", etapa).strip("_") or f"etapa_{indice}"
+            nome_etapa = re.sub(r"[^A-Za-z0-9_-]+", "_", acao.descricao).strip("_") or f"etapa_{indice}"
             self.page.screenshot(
                 path=str(LogBanco.LOG_DIR / f"fluxo_r{indice_rotina:02d}_{indice:02d}_{nome_etapa}.png"),
                 full_page=True,
             )
-            cronometro.atualizar_acao(f"{prefixo} concluída: '{etapa}'")
+            cronometro.atualizar_acao(f"{prefixo} concluída: '{acao.descricao}'")
             sleep(1)
+
+    # executa UMA ação dentro da rotina
+    def _executar_acao(self, acao: Acao, timeout: int) -> None:
+        """clicar/duplo: espera o alvo aparecer, pausa (PausaAntesAcao) e clica.
+        tecla: pausa e aperta a tecla (no campo/tela em foco).
+        esperar: só aguarda o texto aparecer - mede quanto o Protheus demora a responder."""
+        pausa_ms = int(CONFIG.get("PausaAntesAcao", 2000))
+
+        if acao.tipo == "esperar":
+            if not self._texto_visivel(acao.alvo, timeout=timeout):
+                self._print_falha(acao.descricao)
+                raise PlaywrightTimeoutError(f"'{acao.alvo}' não apareceu na tela dentro de {timeout}ms")
+            return
+
+        if acao.tipo == "tecla":
+            # A mesma pausa dos cliques: a tela precisa estar pronta para receber a tecla.
+            sleep(pausa_ms / 1000)
+            self.page.keyboard.press(acao.alvo)
+            logger.info("Tecla '%s' pressionada", acao.alvo)
+            return
+
+        # clicar / duplo: espera o botão aparecer e dá uma pausa curta antes de clicar - com a
+        # tela ainda carregando, o Protheus ignora o clique. A pausa é fixa, então entra igual
+        # em todas as medições.
+        if pausa_ms > 0:
+            if not self._etapa_visivel(acao.alvo, timeout=timeout):
+                self._print_falha(acao.descricao)
+                raise PlaywrightTimeoutError(f"Elemento '{acao.alvo}' não foi encontrado dentro de {timeout}ms")
+            sleep(pausa_ms / 1000)
+        self._esperar_e_clicar(self._alvo_da_etapa(acao.alvo), timeout=timeout, duplo_clique=acao.tipo == "duplo")
+
+    # print da tela quando uma ação falha (antes de qualquer Esc)
+    def _print_falha(self, descricao: str) -> None:
+        try:
+            nome_print = re.sub(r"[^A-Za-z0-9_-]+", "_", descricao).strip("_")
+            self.page.screenshot(
+                path=str(LogBanco.LOG_DIR / f"timeout_{nome_print}_{int(monotonic() * 1000)}.png"),
+                full_page=True,
+            )
+        except PlaywrightError:
+            pass
+
+    # algum texto CONTENDO `texto` está visível? (para "esperar": ex. o número de um pedido numa linha)
+    def _texto_visivel(self, texto: str, timeout: int) -> bool:
+        deadline = monotonic() + timeout / 1000
+        proxima_verificacao_licenca = monotonic()
+        while True:
+            if monotonic() >= proxima_verificacao_licenca:
+                self.verificar_licenca()
+                proxima_verificacao_licenca = monotonic() + INTERVALO_VERIFICACAO_LICENCA
+            for frame in list(self.page.frames):
+                try:
+                    candidatos = frame.get_by_text(texto)
+                    for i in range(min(candidatos.count(), 20)):
+                        if candidatos.nth(i).is_visible():
+                            return True
+                except PlaywrightError:
+                    continue
+            if monotonic() >= deadline:
+                return False
+            sleep(0.3)
 
     # texto ou seletor usado para localizar uma etapa de ação na tela da rotina
     @staticmethod
@@ -977,39 +1040,47 @@ class ProtheusPlaywrightMainFlow:
         return self._item_visivel_rapido(etapa, timeout=timeout)
 
     # depois de clicar numa ação, garante que a tela andou (a próxima etapa apareceu)
-    def _garantir_proxima_etapa(self, etapa: str, proxima: str) -> None:
+    def _garantir_proxima_etapa(self, acao: Acao, proxima: Acao) -> None:
         """Se a próxima etapa não aparece e o botão clicado continua na tela, o clique foi
         ignorado (ex.: tela ainda carregando): clica de novo, até AcaoRetries vezes.
         Se o botão sumiu, a tela está mudando: a espera longa fica para a próxima etapa."""
         tentativas = max(0, int(CONFIG.get("AcaoRetries", 2)))
         espera_ms = int(CONFIG.get("AcaoEfeitoTimeout", 15000))
+        def proxima_apareceu(espera: int) -> bool:
+            if proxima.tipo == "esperar":
+                return self._texto_visivel(proxima.alvo, timeout=espera)
+            return self._etapa_visivel(proxima.alvo, timeout=espera)
+
         for tentativa in range(1, tentativas + 1):
-            if self._etapa_visivel(proxima, timeout=espera_ms):
+            if proxima_apareceu(espera_ms):
                 return
-            if not self._etapa_visivel(etapa, timeout=500):
+            if not self._etapa_visivel(acao.alvo, timeout=500):
                 return  # a tela mudou; a próxima etapa ainda está carregando
             logger.warning(
                 "Clique em '%s' não teve efeito ('%s' não apareceu em %ss); clicando de novo (%d de %d)",
-                etapa, proxima, espera_ms // 1000, tentativa, tentativas,
+                acao.alvo, proxima.alvo, espera_ms // 1000, tentativa, tentativas,
             )
-            self._esperar_e_clicar(self._alvo_da_etapa(etapa), timeout=10000, pressionar_escape_ao_falhar=False)
+            self._esperar_e_clicar(self._alvo_da_etapa(acao.alvo), timeout=10000,
+                                   duplo_clique=acao.tipo == "duplo", pressionar_escape_ao_falhar=False)
 
-    # percorre as etapas do menu pela árvore; devolve quantas etapas do caminho eram do menu
-    def _navegar_menu(self, cronometro, rotina: Rotina, indice_rotina: int, total_rotinas: int) -> int:
-        """Ex.: "Fiscal > Movimento > Documento Entrada > Visualizar":
+    # percorre as etapas do menu pela árvore
+    def _navegar_menu(
+        self, cronometro, etapas: list[str], indice_rotina: int, total_rotinas: int, total_etapas: int,
+    ) -> tuple[int, bool]:
+        """Devolve (quantas etapas eram do menu, se a rotina abriu).
+
+        Ex.: ["Fiscal", "Movimento", "Documento Entrada", ...]:
         - Fiscal: procurado na raiz; se fechado, clica (o acordeão fecha o módulo anterior);
         - Movimento: procurado SÓ dentro de Fiscal; se já aberto, não clica;
-        - Documento Entrada: não é pasta -> clica e a rotina abre. Retorna 3.
-        As etapas seguintes (Visualizar...) ficam para executar_rotina.
+        - Documento Entrada: não é pasta -> clica e a rotina abre. Devolve (3, True).
         """
         menu_timeout = int(CONFIG.get("MenuTimeout", 60000))
         passo_timeout = int(CONFIG.get("MenuStepTimeout", 15000))
         escopo_id: str | None = None  # None = raiz do menu
-        total_etapas = len(rotina.etapas)
 
-        for indice, etapa in enumerate(rotina.etapas, start=1):
+        for indice, etapa in enumerate(etapas, start=1):
             if etapa.casefold() in rotinas_cfg.ETAPAS_SAIDA:
-                return indice - 1
+                return indice - 1, False
             prefixo = f"Rotina {indice_rotina}/{total_rotinas} - Etapa {indice}/{total_etapas}"
             cronometro.atualizar_acao(f"{prefixo}: procurando '{etapa}' no menu")
 
@@ -1018,7 +1089,7 @@ class ProtheusPlaywrightMainFlow:
             timeout = menu_timeout if indice == 1 else passo_timeout
             achado = self._aguardar_item_menu(escopo_id, etapa, timeout)
             if achado is None:
-                local = "na raiz do menu" if escopo_id is None else f"dentro de '{rotina.etapas[indice - 2]}'"
+                local = "na raiz do menu" if escopo_id is None else f"dentro de '{etapas[indice - 2]}'"
                 raise PlaywrightTimeoutError(f"Item '{etapa}' não encontrado {local} após {timeout}ms")
             frame, item = achado
 
@@ -1036,10 +1107,10 @@ class ProtheusPlaywrightMainFlow:
             cronometro.atualizar_acao(f"{prefixo} concluída: '{etapa}'")
 
             if not item["pasta"]:
-                return indice  # a rotina foi aberta; o resto do caminho são ações na tela dela
+                return indice, True  # a rotina foi aberta; o resto do caminho são ações na tela dela
             escopo_id = item["id"]
 
-        return total_etapas
+        return len(etapas), False  # todas eram pastas: nenhuma rotina abriu
 
     # clica no item do menu e CONFIRMA que o clique teve efeito; repete se só selecionou
     def _clicar_item_menu(self, frame, item: dict, etapa: str, timeout: int) -> None:
@@ -1120,7 +1191,7 @@ class ProtheusPlaywrightMainFlow:
         """Retorna True quando a 1ª etapa do caminho (ex.: o módulo 'Compras') está visível no menu."""
         tentativas = int(CONFIG.get("VoltarTelaTentativas", 3))
         espera_ms = int(CONFIG.get("VoltarTelaTimeout", 15000))
-        item_menu = rotina.etapas[0]
+        item_menu = rotina.modulo
         inicio = monotonic()
         cronometro.atualizar_acao(f"Voltando para a tela principal após '{rotina.nome}'")
 
@@ -1683,7 +1754,8 @@ LÓGICA GERAL
 2. LOGIN ÚNICO: abre o navegador, acessa a URL, faz login, MFA e empresa/filial
    uma única vez. Esse trecho é cronometrado como "Login".
 3. Para cada rotina, na mesma sessão:
-   a) executa o caminho (menu > rotina > ações) - cronometrado individualmente.
+   a) navega o "Menu" até abrir a rotina e faz as "Acoes" (clicar, duplo, tecla,
+      esperar) - cronometrado individualmente (formato em rotinas.py).
       O menu é percorrido LENDO A ÁRVORE do WebApp (wa-menu / wa-menu-item, que é
       aninhada): cada item é procurado só dentro do item pai (evita confundir
       "Compras > Movimento" com "Fiscal > Movimento") e pastas já abertas não são
@@ -1703,4 +1775,4 @@ LÓGICA GERAL
 6. Erro conhecido "Excedeu numero de licenças" (janela TOTVS): reconhecido na tela,
    vira LicencaExcedidaError (erros_protheus.py), tem descrição e e-mail próprios e
    NÃO entra nas novas tentativas.
-"""
+"""

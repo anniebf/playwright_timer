@@ -53,6 +53,59 @@ class TestCarregarRotinas(unittest.TestCase):
             rotinas.carregar_rotinas({"Rotinas": [" > > "]})
 
 
+class TestFormatoMenuAcoes(unittest.TestCase):
+    """Formato padrão: {"Nome", "Menu", "Acoes": [{"clicar": ...}, {"tecla": ...}, ...]}."""
+
+    CONFIG = {"Rotinas": [
+        {"Nome": "Pedido de Compra - pesquisa",
+         "Menu": "Compras > Movimento > Pedidos de Compra",
+         "Acoes": [{"clicar": "Visualizar"}, {"tecla": "Enter"}, {"esperar": "000123"},
+                   {"duplo": "000123"}, "Cancelar", {"clicar": "sair"}]},
+        {"Nome": "Documento de entrada",
+         "Fluxo": "Fiscal > Movimento > Documento Entrada > Visualizar > Cancelar > sair"},
+    ]}
+
+    def test_menu_e_acoes(self):
+        pesquisa, documento = rotinas.carregar_rotinas(self.CONFIG)
+        self.assertEqual(pesquisa.menu, ("Compras", "Movimento", "Pedidos de Compra"))
+        self.assertEqual([(a.tipo, a.alvo) for a in pesquisa.acoes],
+                         [("clicar", "Visualizar"), ("tecla", "Enter"), ("esperar", "000123"),
+                          ("duplo", "000123"), ("clicar", "Cancelar"), ("clicar", "sair")])
+        self.assertTrue(pesquisa.termina_com_saida)
+        self.assertEqual(pesquisa.modulo, "Compras")
+        self.assertEqual(pesquisa.caminho,
+                         "Compras > Movimento > Pedidos de Compra > Visualizar > tecla Enter > "
+                         "esperar 000123 > duplo 000123 > Cancelar > sair")
+        # o formato antigo continua: menu vazio e tudo como "clicar"
+        self.assertEqual(documento.menu, ())
+        self.assertEqual(documento.modulo, "Fiscal")
+        self.assertEqual({a.tipo for a in documento.acoes}, {"clicar"})
+
+    def test_nome_padrao_e_o_ultimo_item_do_menu(self):
+        (rotina,) = rotinas.carregar_rotinas({"Rotinas": [{"Menu": "Compras > Movimento > Pedidos de Compra"}]})
+        self.assertEqual(rotina.nome, "Pedidos de Compra")
+        self.assertEqual(rotina.acoes, ())
+
+    def test_erros_claros_de_configuracao(self):
+        casos = {
+            "não está disponível": {"Menu": "A > B", "Acoes": [{"digitar": "000123"}]},
+            "desconhecida": {"Menu": "A > B", "Acoes": [{"apertar": "Enter"}]},
+            "tecla inválida": {"Menu": "A > B", "Acoes": [{"tecla": "Enter já"}]},
+            "UMA ação": {"Menu": "A > B", "Acoes": [{"clicar": "X", "tecla": "Enter"}]},
+            "precisa de um texto": {"Menu": "A > B", "Acoes": [{"esperar": ""}]},
+            "não os dois": {"Menu": "A > B", "Fluxo": "A > B"},
+            "sem a chave 'Menu'": {"Nome": "X", "Acoes": [{"clicar": "Visualizar"}]},
+            "vai em Acoes": {"Menu": "A > B > sair"},
+            "deve ser uma lista": {"Menu": "A > B", "Acoes": {"clicar": "X"}},
+        }
+        for trecho, rotina in casos.items():
+            with self.subTest(trecho):
+                with self.assertRaises(ValueError) as erro:
+                    rotinas.carregar_rotinas({"Rotinas": [rotina]})
+                self.assertIn(trecho, str(erro.exception))
+                self.assertIn("Rotina #1", str(erro.exception))
+
+
 class TestRelatorio(unittest.TestCase):
     def test_resumo_e_json(self):
         resultados = [
