@@ -21,8 +21,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # Dependências primeiro: a camada fica em cache enquanto o requirements não mudar.
-COPY requirements-mapa.txt .
-RUN pip install --no-cache-dir -r requirements-mapa.txt
+# Instala SÓ o que o serviço usa, com as versões do requirements.txt (-c = restrições):
+# uma única fonte de versões e uma imagem leve (sem Playwright, pandas etc.).
+COPY requirements.txt .
+RUN pip install --no-cache-dir -c requirements.txt fastapi uvicorn oracledb python-dotenv
 
 # Só o que o serviço usa.
 COPY api_mapa.py mapa_calor.py mapa_calor_template.html ./

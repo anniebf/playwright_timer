@@ -1,7 +1,7 @@
 """
 Testes do serviço api_mapa.py (FastAPI), com o banco SIMULADO.
 
-Precisam de fastapi + httpx (requirements-mapa.txt); sem eles, são pulados.
+Precisam de fastapi + httpx (estão no requirements.txt); sem eles, são pulados.
 Rodar: python -m unittest discover -s tests -v
 """
 import sys
@@ -23,7 +23,7 @@ import mapa_calor  # noqa: E402
 from linhas_exemplo import execucao_padrao  # noqa: E402
 
 
-@unittest.skipUnless(TEM_FASTAPI, "fastapi/httpx não instalados (pip install -r requirements-mapa.txt)")
+@unittest.skipUnless(TEM_FASTAPI, "fastapi/httpx não instalados (pip install -r requirements.txt)")
 class TestApiMapa(unittest.TestCase):
     def setUp(self):
         # Banco simulado: 2 execuções do robô antigo + 5 atuais (a última com 'Visualizar' lento).

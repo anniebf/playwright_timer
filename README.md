@@ -72,7 +72,6 @@ playwright_timer/
 ├── mapa_calor.py               # Regras do mapa de calor: lê o RPA.TIMER, calcula o "normal", detalhe da execução
 ├── mapa_calor_template.html    # Página do mapa (usada pelo serviço e pelo arquivo; não abrir direto)
 ├── api_mapa.py                 # SERVIÇO web do mapa de calor (FastAPI)
-├── requirements-mapa.txt       # Dependências do serviço (sem Playwright)
 ├── Dockerfile.mapa             # Imagem do serviço do mapa (separada da do robô)
 │
 ├── config.example.json         # ⇢ MODELO do config.json (copie e preencha)
@@ -80,7 +79,7 @@ playwright_timer/
 ├── config.json                 # Sua configuração (NÃO versionado)
 ├── .env                        # Seus segredos (NÃO versionado)
 ├── idExec.json                 # Contador do ID_EXECUCAO (atualizado a cada execução)
-├── requirements.txt            # Dependências Python
+├── requirements.txt            # Todas as dependências (robô, serviço do mapa e testes)
 │
 ├── Dockerfile                  # Imagem com Python, Firefox, Xvfb e TOTVS WebAgent
 ├── run_docker.py               # Executa o container (usado pelo Airflow)
@@ -464,14 +463,14 @@ Em execuções do TIR não há registros por segundo, então só aparecem os tem
 **No Windows (para testar):**
 
 ```powershell
-pip install -r requirements-mapa.txt
+pip install -r requirements.txt   # se ainda não instalou
 python api_mapa.py                 # http://localhost:8010
 # ou: uvicorn api_mapa:app --host 0.0.0.0 --port 8010
 ```
 
 O serviço não recarrega o código sozinho: depois de atualizar os arquivos, pare (Ctrl+C) e rode de novo.
 
-**No servidor (Docker, sempre no ar)** — imagem leve e separada da do robô (só Python, FastAPI e `oracledb`):
+**No servidor (Docker, sempre no ar)** — imagem leve e separada da do robô: o `Dockerfile.mapa` instala só FastAPI, Uvicorn, `oracledb` e `python-dotenv`, nas versões do `requirements.txt`:
 
 ```bash
 docker build -f Dockerfile.mapa -t hiannyurt/protheus-timer-mapa:latest .
@@ -527,7 +526,7 @@ python -m unittest discover -s tests -v
 | `tests/test_rotinas.py` | Leitura das rotinas (`Rotinas`, `Fluxo`, `--fluxo`) e relatório JSON |
 | `tests/test_erros_protheus.py` | Reconhecimento da mensagem de licenças |
 | `tests/test_mapa_calor.py` | Classificação normal/atenção/lenta/erro, leitura das linhas do banco, detalhe da execução e fallback |
-| `tests/test_api_mapa.py` | Rotas do serviço com o banco simulado (pulado se `fastapi`/`httpx` não estiverem instalados) |
+| `tests/test_api_mapa.py` | Rotas do serviço com o banco simulado (pulado se `fastapi`/`httpx` não estiverem instalados — `pip install -r requirements.txt`) |
 | `tests/linhas_exemplo.py` | Gera linhas no mesmo formato que o robô grava no `RPA.TIMER` (usado pelos testes) |
 
 Para testar uma rotina nova de ponta a ponta, rode com `--headed` e `--fluxo` (ver 4.2) e confira os prints `fluxo_*.png`.
