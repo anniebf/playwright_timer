@@ -9,6 +9,20 @@ O projeto tem duas partes:
 - **o robô** (`main_playwright.py`), que roda de hora em hora, cronometra o login e cada rotina e grava tudo no banco;
 - **o mapa de calor** (`api_mapa.py`), um serviço web que lê o banco e mostra o histórico de tempos, quais rotinas estão lentas ou com erro e, clicando numa execução, onde o tempo foi gasto.
 
+Comandos docker para subir a imagem 
+
+```powershell
+docker login  # Primeiro fazer login no docker
+
+docker build --no-cache -t hiannyurt/playwright-webagent:versaoatual .  # Docker build para criar uma nova versao da imagem
+docker pull hiannyurt/playwright-webagent:latest  #docker pull para subir a nova versao da imagem
+
+#para o rodar 
+#para fazer no servidor ou para usar a imagem ja existente no docker hub em outra maquina
+docker login
+docker push hiannyurt/playwright-webagent:latest
+
+```
 ---
 
 ## Sumário

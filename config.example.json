@@ -20,9 +20,10 @@
             "Nome": "Documento de entrada",
             "Menu": "Fiscal > Movimento > Documento Entrada",
             "Acoes": [
-                { "clicar": "Visualizar" },
-                { "clicar": "Cancelar" },
-                { "clicar": "sair" }
+                { "digitar": "Visualizar" },
+                { "esperar": "Cancelar" },
+                { "duplo": "Cancelar" },
+                { "tecla": "sair" }
             ]
         }
     ],
