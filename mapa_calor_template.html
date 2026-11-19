@@ -368,6 +368,14 @@ function agendarAtualizacao() {
 }
 
 /* ---------- Inicialização ---------- */
+/* Aberto o MODELO (sem dados): orienta a abrir o arquivo gerado, em vez de quebrar a página. */
+if (!DADOS) {
+  document.querySelector(".page").innerHTML = `<h1>Mapa de calor - tempo das rotinas Protheus</h1>
+    <div class="card vazio-msg">Este arquivo é apenas o <b>modelo</b> do mapa (sem dados).<br>
+    Abra <b>log_playwright\\mapa_calor.html</b>, gerado ao final de cada execução,<br>
+    ou gere agora com: <code>python mapa_calor.py log_playwright</code></div>`;
+  throw new Error("Modelo sem dados: abra log_playwright/mapa_calor.html");
+}
 const g = fmtData(DADOS.gerado_em);
 $("sub").textContent = `${DADOS.colunas.length} execuções · ${DADOS.rotinas.length} itens (login + rotinas) · atualizado em ${g.completa}`;
 $("nota").textContent = `"Normal" = mediana das últimas ${DADOS.parametros.janela} execuções sem erro da mesma rotina, anteriores a cada célula. ` +
