@@ -923,11 +923,28 @@ class ProtheusPlaywrightMainFlow:
             logger.info("%s do fluxo: '%s'", prefixo, etapa)
             cronometro.atualizar_acao(f"{prefixo}: procurando '{etapa}'")
 
-            if etapa.casefold() in rotinas_cfg.ETAPAS_SAIDA:
-                # 'sair'/'fechar' = botão de fechar a tela da rotina
-                self._esperar_e_clicar("wa-button#COMP6014 button", timeout=timeout)
-            else:
-                self._esperar_e_clicar(etapa, timeout=timeout)
+            # Espera o botão aparecer e dá uma pausa curta antes de clicar: com a tela ainda
+            # carregando, o Protheus ignora o clique (ex.: "Visualizar" logo após abrir a rotina).
+            # A pausa é fixa, então entra igual em todas as medições.
+            pausa_ms = int(CONFIG.get("PausaAntesAcao", 2000))
+            if pausa_ms > 0:
+                if not self._etapa_visivel(etapa, timeout=timeout):
+                    try:
+                        nome_print = re.sub(r"[^A-Za-z0-9_-]+", "_", etapa).strip("_")
+                        self.page.screenshot(
+                            path=str(LogBanco.LOG_DIR / f"timeout_{nome_print}_{int(monotonic() * 1000)}.png"),
+                            full_page=True,
+                        )
+                    except PlaywrightError:
+                        pass
+                    raise PlaywrightTimeoutError(f"Elemento '{etapa}' não foi encontrado dentro de {timeout}ms")
+                sleep(pausa_ms / 1000)
+            self._esperar_e_clicar(self._alvo_da_etapa(etapa), timeout=timeout)
+
+            # Confirma que o clique teve efeito: a PRÓXIMA etapa precisa aparecer.
+            # (Ex.: clicar em "Visualizar" com a lista ainda carregando é ignorado pelo Protheus.)
+            if indice < len(etapas_fluxo):
+                self._garantir_proxima_etapa(etapa, etapas_fluxo[indice])
 
             nome_etapa = re.sub(r"[^A-Za-z0-9_-]+", "_", etapa).strip("_") or f"etapa_{indice}"
             self.page.screenshot(
@@ -936,6 +953,46 @@ class ProtheusPlaywrightMainFlow:
             )
             cronometro.atualizar_acao(f"{prefixo} concluída: '{etapa}'")
             sleep(1)
+
+    # texto ou seletor usado para localizar uma etapa de ação na tela da rotina
+    @staticmethod
+    def _alvo_da_etapa(etapa: str) -> str:
+        # 'sair'/'fechar' = botão de fechar a tela da rotina
+        return "wa-button#COMP6014 button" if etapa.casefold() in rotinas_cfg.ETAPAS_SAIDA else etapa
+
+    # a etapa está visível agora? (texto, ou o botão de sair)
+    def _etapa_visivel(self, etapa: str, timeout: int) -> bool:
+        if etapa.casefold() in rotinas_cfg.ETAPAS_SAIDA:
+            deadline = monotonic() + timeout / 1000
+            while True:
+                for frame in list(self.page.frames):
+                    try:
+                        if frame.locator("wa-button#COMP6014 button").first.is_visible():
+                            return True
+                    except PlaywrightError:
+                        continue
+                if monotonic() >= deadline:
+                    return False
+                sleep(0.3)
+        return self._item_visivel_rapido(etapa, timeout=timeout)
+
+    # depois de clicar numa ação, garante que a tela andou (a próxima etapa apareceu)
+    def _garantir_proxima_etapa(self, etapa: str, proxima: str) -> None:
+        """Se a próxima etapa não aparece e o botão clicado continua na tela, o clique foi
+        ignorado (ex.: tela ainda carregando): clica de novo, até AcaoRetries vezes.
+        Se o botão sumiu, a tela está mudando: a espera longa fica para a próxima etapa."""
+        tentativas = max(0, int(CONFIG.get("AcaoRetries", 2)))
+        espera_ms = int(CONFIG.get("AcaoEfeitoTimeout", 15000))
+        for tentativa in range(1, tentativas + 1):
+            if self._etapa_visivel(proxima, timeout=espera_ms):
+                return
+            if not self._etapa_visivel(etapa, timeout=500):
+                return  # a tela mudou; a próxima etapa ainda está carregando
+            logger.warning(
+                "Clique em '%s' não teve efeito ('%s' não apareceu em %ss); clicando de novo (%d de %d)",
+                etapa, proxima, espera_ms // 1000, tentativa, tentativas,
+            )
+            self._esperar_e_clicar(self._alvo_da_etapa(etapa), timeout=10000, pressionar_escape_ao_falhar=False)
 
     # percorre as etapas do menu pela árvore; devolve quantas etapas do caminho eram do menu
     def _navegar_menu(self, cronometro, rotina: Rotina, indice_rotina: int, total_rotinas: int) -> int:

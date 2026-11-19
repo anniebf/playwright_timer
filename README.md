@@ -154,6 +154,10 @@ Rotina 2: ...                                             -> tempo "Rotina 2"
 | `VoltarTelaTimeout` | `15000` | Tempo (ms) esperando o menu reaparecer depois de fechar a rotina. |
 | `VoltarTelaTentativas` | `3` | Tentativas de fechar a rotina e voltar para a tela principal. |
 | `FecharRotinaTimeout` | `10000` | Tempo (ms) procurando o botao de sair da rotina. |
+| `RotinaAbrirTimeout` | `60000` | Tempo (ms) esperando a rotina abrir depois do clique no menu. |
+| `PausaAntesAcao` | `2000` | Pausa (ms) entre o botao da acao aparecer e o clique; evita clique ignorado com a tela ainda carregando. Entra igual em todas as medicoes. |
+| `AcaoEfeitoTimeout` | `15000` | Tempo (ms) esperando a proxima etapa aparecer depois de clicar numa acao (ex.: Visualizar). |
+| `AcaoRetries` | `2` | Quantas vezes clicar de novo numa acao que nao teve efeito (o botao continua na tela e a proxima etapa nao apareceu). |
 
 - **Tempos**: log final (`Resumo dos tempos por rotina`, comecando pelo Login), `RPA.TIMER` (linhas `Tempo Login: Ns` e `Tempo Rotina '<nome>': Ns`, com `TEMPO_EXECUCAO` = segundos do item, todas com o mesmo `ID_EXECUCAO`) e `log_playwright/tempos_rotinas_<id>.json`.
 - **Tela principal**: depois de cada rotina o robo clica em sair (se o caminho nao terminou em `sair`) e confirma que a 1a etapa do caminho (o modulo, ex.: `Compras`) esta visivel no menu.
