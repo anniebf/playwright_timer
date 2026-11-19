@@ -96,6 +96,31 @@ JS_LOCALIZAR_ITEM_MENU = """
 }
 """
 
+# Marca o TEXTO do item (span.caption, dentro do shadow DOM do wa-menu-item) com um
+# atributo, para o Playwright clicar exatamente nele - como fazia a busca por texto antiga.
+# Clicar fora do texto às vezes só SELECIONA o item (fica azul) sem abrir.
+JS_MARCAR_ALVO_MENU = """
+(id) => {
+  const item = document.getElementById(id);
+  const alvo = item && item.shadowRoot && item.shadowRoot.querySelector('span.caption');
+  if (!alvo) return false;
+  alvo.setAttribute('data-rpa-alvo', id);
+  return true;
+}
+"""
+
+# Estado atual de um item do menu, usado para confirmar o efeito do clique:
+# pasta -> "aberta" (subitens visíveis); rotina -> o menu some ("visivel" = false).
+JS_ESTADO_ITEM_MENU = """
+(id) => {
+  const item = document.getElementById(id);
+  if (!item) return { visivel: false, aberta: false };
+  const visivel = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const sub = [...item.children].filter(c => c.tagName === 'WA-MENU-ITEM');
+  return { visivel: visivel(item), aberta: sub.some(visivel) };
+}
+"""
+
 # Carrega o arquivo JSON com log de falha caso ocorra erro na leitura
 try:
     with CONFIG_PATH.open("r", encoding="utf-8") as config_file:
@@ -909,8 +934,7 @@ class ProtheusPlaywrightMainFlow:
                 # Clicar numa pasta aberta a fecharia.
                 logger.info("%s: pasta '%s' já está aberta; sem clique", prefixo, etapa)
             else:
-                # Clica na linha do título (topo do item; abaixo ficam os subitens).
-                frame.locator(f"wa-menu-item#{item['id']}").click(position={"x": 40, "y": 10}, timeout=timeout)
+                self._clicar_item_menu(frame, item, etapa, timeout)
                 logger.info("%s: clique em '%s' (menu, %s)", prefixo, etapa, item["id"])
                 nome_etapa = re.sub(r"[^A-Za-z0-9_-]+", "_", etapa).strip("_") or f"etapa_{indice}"
                 self.page.screenshot(
@@ -924,6 +948,47 @@ class ProtheusPlaywrightMainFlow:
             escopo_id = item["id"]
 
         return total_etapas
+
+    # clica no item do menu e CONFIRMA que o clique teve efeito; repete se só selecionou
+    def _clicar_item_menu(self, frame, item: dict, etapa: str, timeout: int) -> None:
+        """Pasta: espera abrir (subitens visíveis). Rotina: espera o menu sumir (a tela da
+        rotina ocupa a página). Se o clique só selecionou o item, clica de novo."""
+        tentativas = max(1, int(CONFIG.get("MenuRetries", 2)))
+        espera_ms = int(CONFIG.get("MenuStepTimeout", 15000))
+        item_id = item["id"]
+
+        for tentativa in range(1, tentativas + 1):
+            if frame.evaluate(JS_MARCAR_ALVO_MENU, item_id):
+                frame.locator(f'[data-rpa-alvo="{item_id}"]').first.click(timeout=timeout)
+            else:
+                # Sem o texto no shadow DOM: clica na linha do título do item.
+                frame.locator(f"wa-menu-item#{item_id}").click(position={"x": 60, "y": 10}, timeout=timeout)
+
+            if self._aguardar_efeito_clique(frame, item, espera_ms):
+                return
+            logger.warning(
+                "Clique em '%s' não teve efeito (%s); tentativa %d de %d",
+                etapa, "pasta não abriu" if item["pasta"] else "rotina não abriu", tentativa, tentativas,
+            )
+            self.verificar_licenca()
+
+        o_que = "a pasta não abriu" if item["pasta"] else "a rotina não abriu"
+        raise PlaywrightTimeoutError(f"Item '{etapa}' do menu foi clicado {tentativas}x, mas {o_que}")
+
+    # espera o efeito do clique: pasta aberta ou rotina aberta (menu escondido)
+    def _aguardar_efeito_clique(self, frame, item: dict, espera_ms: int) -> bool:
+        deadline = monotonic() + espera_ms / 1000
+        while monotonic() < deadline:
+            try:
+                estado = frame.evaluate(JS_ESTADO_ITEM_MENU, item["id"])
+            except PlaywrightError:
+                estado = {"visivel": False, "aberta": False}  # frame recarregou: a tela mudou
+            if item["pasta"] and estado["aberta"]:
+                return True
+            if not item["pasta"] and not estado["visivel"]:
+                return True
+            sleep(0.3)
+        return False
 
     # espera o item aparecer na árvore do menu (dentro do pai informado)
     def _aguardar_item_menu(self, escopo_id: str | None, texto: str, timeout: int):
