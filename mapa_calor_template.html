@@ -186,6 +186,8 @@
         <option value="60" selected>60 dias</option>
         <option value="90">90 dias</option>
         <option value="180">180 dias</option>
+        <option value="365">1 ano</option>
+        <option value="730">2 anos</option>
       </select>
     </label>
     <label>Período
@@ -271,10 +273,15 @@ function recorte() {
 function desenharResumo() {
   const ultimo = DADOS.colunas.length - 1;
   if (ultimo < 0) { $("tiles").innerHTML = ""; return; }
-  const itens = DADOS.rotinas.map(r => [r, DADOS.celulas[r][ultimo]]).filter(([, c]) => c);
+  // "Execução completa" é o total: fica fora das contagens para não contar o mesmo problema duas vezes
+  const totalCel = DADOS.celulas["Execução completa"] ? DADOS.celulas["Execução completa"][ultimo] : null;
+  const itens = DADOS.rotinas.filter(r => r !== "Execução completa")
+    .map(r => [r, DADOS.celulas[r][ultimo]]).filter(([, c]) => c);
+  // Execução antiga (TIR) só tem o total: o resumo usa ele
+  if (!itens.length && totalCel) itens.push(["Execução completa", totalCel]);
   const conta = st => itens.filter(([, c]) => c.status === st).length;
   const lentas = conta("lenta") + conta("atencao"), erros = conta("erro") + conta("pulada");
-  const total = itens.reduce((s, [, c]) => s + (c.s || 0), 0);
+  const total = totalCel ? totalCel.s : itens.reduce((s, [, c]) => s + (c.s || 0), 0);
   const login = DADOS.celulas["Login"] ? DADOS.celulas["Login"][ultimo] : null;
   const nomes = st => itens.filter(([, c]) => st.includes(c.status)).map(([r]) => r).join(", ");
   const d = fmtData(DADOS.colunas[ultimo].data);
@@ -311,7 +318,8 @@ function desenharLegenda() {
 function textoCelula(c) {
   if (c.status === "erro") return "erro";
   if (c.status === "pulada") return "–";
-  return estado.valor === "var" && c.var != null ? fmtVar(c.var) : fmtS(c.s);
+  const valor = estado.valor === "var" && c.var != null ? fmtVar(c.var) : fmtS(c.s);
+  return (c.estimado ? "~" : "") + valor;  // ~ = estimado a partir de registros antigos
 }
 function desenharMapa() {
   const { idx, rotinas } = recorte();
@@ -368,6 +376,8 @@ function mostrarTip(btn, x, y) {
     <div class="r">Normal (mediana) <b>${c.normal == null ? "sem histórico" : fmtS(c.normal)}</b></div>
     <div class="r">Variação <b>${fmtVar(c.var)}</b></div>
     <div class="r">Status <b>${st.nome}</b></div>
+    ${c.estimado ? `<div class="e">Tempo <b>estimado</b>: execução de uma versão antiga do robô, antes da gravação dos tempos por item.</div>` : ""}
+    ${col.origem && col.origem !== "atual" ? `<div class="r">Origem <b>${esc(col.origem)}</b></div>` : ""}
     ${c.erro ? `<div class="e">${esc(c.erro)}</div>` : ""}
     ${c.caminho ? `<div class="e">${esc(c.caminho)}</div>` : ""}`;
   const tip = $("tip"); tip.style.display = "block";
@@ -448,7 +458,8 @@ async function abrirDetalhe(rotina, i) {
   painel.innerHTML = `<p class="nota">Carregando a execução ${esc(col.id)}...</p>`;
   painel.scrollIntoView({ behavior: "smooth", block: "nearest" });
   try {
-    detalheAtual = await buscarJson(`api/execucoes/${encodeURIComponent(col.id)}`);
+    detalheAtual = await buscarJson(`api/execucoes/${encodeURIComponent(col.id)}?dia=${encodeURIComponent(col.dia)}`);
+    detalheAtual.coluna = i;  // as células do mapa dão os tempos (inclusive estimados e o total)
     desenharDetalhe(rotina);
   } catch (e) {
     painel.innerHTML = `<div class="aviso">Não foi possível carregar o detalhe: ${esc(e.message)}</div>`;
@@ -456,16 +467,26 @@ async function abrirDetalhe(rotina, i) {
 }
 function desenharDetalhe(secaoEscolhida) {
   const d = detalheAtual, painel = $("detalhe");
-  const secao = d.secoes.find(s => s.nome === secaoEscolhida) || d.secoes[0];
-  const maior = secao ? Math.max(...secao.passos.map(p => p.duracao_s)) : 0;
-  const tempos = d.tempos.map(t => `<button type="button" class="tempo" data-secao="${esc(t.nome)}"
-      aria-pressed="${secao && t.nome === secao.nome}"><span class="chip st-${t.sucesso ? "normal" : "erro"}">${t.sucesso ? "✓" : "✕"}</span>
-      ${esc(t.nome)} <b>${fmtS(t.segundos)}</b></button>`).join("");
+  // Itens da execução, na ordem das linhas do mapa (Execução completa, Login, rotinas)
+  const itens = DADOS.rotinas.map(nome => [nome, DADOS.celulas[nome][d.coluna]]).filter(([, c]) => c);
+  const itensPassos = itens.filter(([nome]) => nome !== "Execução completa");
+  // Seção do passo a passo: pelo nome; nas execuções antigas, pela posição (Login, rotina)
+  const acharSecao = nome => d.secoes.find(s => s.nome === nome)
+    || d.secoes[itensPassos.findIndex(([n]) => n === nome)];
+  const secao = acharSecao(secaoEscolhida) || d.secoes[0];
+  const nomeSelecionado = secaoEscolhida === "Execução completa" || !acharSecao(secaoEscolhida)
+    ? (secao ? (itensPassos[d.secoes.indexOf(secao)] || [secao.nome])[0] : null) : secaoEscolhida;
+  const maior = secao && secao.passos.length ? Math.max(...secao.passos.map(p => p.duracao_s)) : 0;
+  const tempos = itens.map(([nome, c]) => `<button type="button" class="tempo" data-secao="${esc(nome)}"
+      aria-pressed="${nome === nomeSelecionado}"><span class="chip st-${c.status}">${STATUS[c.status].ic}</span>
+      ${esc(nome)} <b>${c.estimado ? "~" : ""}${fmtS(c.s)}</b></button>`).join("");
   const passos = secao ? secao.passos.map(p => `<tr class="${p.duracao_s === maior && maior >= 3 ? "maior" : ""}">
       <td class="hora">${esc(p.hora)}</td><td class="acao">${esc(p.acao)}</td>
       <td class="dur"><div class="barra"><span class="b" style="width:${Math.max(2, Math.round(p.duracao_s / maior * 100))}%"></span>
       <em>${p.duracao_s}s</em></div></td></tr>`).join("") : "";
-  const erroItem = d.tempos.find(t => secao && t.nome === secao.nome && !t.sucesso);
+  const celSel = itens.find(([nome]) => nome === nomeSelecionado);
+  const erroItem = celSel && celSel[1].erro ? { erro: celSel[1].erro } : null;
+  const origem = DADOS.colunas[d.coluna].origem;
   const eventos = d.eventos.map(ev => `<li><span class="hora">${esc(ev.hora)}</span>
       <span class="chip st-${ev.nivel === "ERRO" ? "erro" : "atencao"}">${ev.nivel === "ERRO" ? "✕" : "▲"}</span><span>${esc(ev.texto)}</span></li>`).join("");
   const ini = d.inicio ? fmtData(d.inicio).completa : "-";
@@ -473,11 +494,13 @@ function desenharDetalhe(secaoEscolhida) {
     <header><h2>Execução ${esc(d.id_execucao)} · ${ini}</h2>
       <span class="nota">${d.final ? `Total ${fmtS(d.final.total_segundos)} · ${esc(d.final.texto)}` : ""}</span>
       <button type="button" class="fechar" id="fechar-detalhe">Fechar</button></header>
+    ${origem && origem !== "atual" ? `<p class="nota">Origem: ${esc(origem)}. Valores com ~ são estimados.</p>` : ""}
     <h3>Tempos desta execução (clique para ver o passo a passo)</h3>
     <div class="tempos">${tempos || '<span class="nota">Sem tempos registrados.</span>'}</div>
     ${erroItem ? `<div class="aviso" style="margin-top:12px"><b>Erro:</b> ${esc(erroItem.erro)}</div>` : ""}
-    <h3>Passo a passo${secao ? ` - ${esc(secao.nome)}` : ""} (onde o tempo foi gasto)</h3>
-    ${passos ? `<table class="passos"><tbody>${passos}</tbody></table>` : '<p class="nota">Sem registros por segundo para este item.</p>'}
+    <h3>Passo a passo${nomeSelecionado ? ` - ${esc(nomeSelecionado)}` : ""} (onde o tempo foi gasto)</h3>
+    ${passos ? `<table class="passos"><tbody>${passos}</tbody></table>`
+             : '<p class="nota">Sem registros por segundo para este item (versões antigas do robô gravavam só o tempo total).</p>'}
     <h3>Avisos e erros da execução</h3>
     ${eventos ? `<ul class="eventos">${eventos}</ul>` : '<p class="nota">Nenhum aviso ou erro.</p>'}`;
   $("fechar-detalhe").onclick = () => { painel.hidden = true; };
@@ -489,6 +512,7 @@ function desenharTudo() {
   const g = fmtData(DADOS.gerado_em);
   $("sub").textContent = `${DADOS.colunas.length} execuções · ${DADOS.rotinas.length} itens (login + rotinas) · fonte: ${DADOS.fonte || "-"} · atualizado em ${g.completa}`;
   $("nota").textContent = `"Normal" = mediana das últimas ${DADOS.parametros.janela} execuções sem erro da mesma rotina, anteriores a cada célula. ` +
+    `"~" = tempo estimado (execuções de versões antigas do robô). ` +
     (MODO_SERVICO ? `Clique numa célula para ver o passo a passo daquela execução.` : `Passe o mouse (ou use Tab) nas células para ver detalhes.`);
   desenharResumo(); desenharLegenda(); desenhar();
 }

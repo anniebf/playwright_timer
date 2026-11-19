@@ -26,22 +26,32 @@ from linhas_exemplo import execucao_padrao  # noqa: E402
 @unittest.skipUnless(TEM_FASTAPI, "fastapi/httpx não instalados (pip install -r requirements-mapa.txt)")
 class TestApiMapa(unittest.TestCase):
     def setUp(self):
-        # Banco simulado: 5 execuções; a última com 'Visualizar' bem mais lento.
+        # Banco simulado: 2 execuções do robô antigo + 5 atuais (a última com 'Visualizar' lento).
+        from linhas_exemplo import execucao_playwright_antiga, resumo_como_no_oracle, tempos_como_no_oracle
         inicio = datetime(2026, 11, 19, 8, 0, 0)
         self.execucoes = {
-            100 + i: execucao_padrao(inicio + timedelta(hours=i), visualizar_s=30 if i == 4 else 6)
-            for i in range(5)
+            (90, "2026-11-10"): execucao_playwright_antiga(datetime(2026, 11, 10, 8, 30), 40, 25),
+            (91, "2026-11-11"): execucao_playwright_antiga(datetime(2026, 11, 11, 8, 30), 42, 24),
         }
-        todas = [(id_, d, h) for id_, linhas in self.execucoes.items() for d, _, _, h in linhas]
-        self._originais = (mapa_calor._consultar,)
-        mapa_calor._consultar = lambda sql, p: (
-            [l for l in todas] if "SYSDATE" in sql else self.execucoes.get(p["id_execucao"], [])
-        )
+        for i in range(5):
+            h = inicio + timedelta(hours=i)
+            self.execucoes[(100 + i, h.strftime("%Y-%m-%d"))] = execucao_padrao(h, visualizar_s=30 if i == 4 else 6)
+
+        def consultar(sql, p):
+            if sql is mapa_calor.SQL_RESUMO_EXECUCOES:
+                return resumo_como_no_oracle(self.execucoes)
+            if sql is mapa_calor.SQL_TEMPOS:
+                return tempos_como_no_oracle(self.execucoes)
+            return next((ls for (id_, dia), ls in self.execucoes.items()
+                         if id_ == p["id_execucao"] and (p["dia"] is None or dia == p["dia"])), [])
+
+        self._original = mapa_calor._consultar
+        mapa_calor._consultar = consultar
         api_mapa._cache.clear()
         self.cliente = TestClient(api_mapa.app)
 
     def tearDown(self):
-        mapa_calor._consultar = self._originais[0]
+        mapa_calor._consultar = self._original
 
     def test_pagina_em_modo_servico(self):
         r = self.cliente.get("/")
@@ -50,13 +60,18 @@ class TestApiMapa(unittest.TestCase):
 
     def test_mapa_classifica_a_ultima_como_lenta(self):
         dados = self.cliente.get("/api/mapa?dias=30").json()
-        self.assertEqual([c["id"] for c in dados["colunas"]], [100, 101, 102, 103, 104])
+        self.assertEqual([c["id"] for c in dados["colunas"]], [90, 91, 100, 101, 102, 103, 104])
+        self.assertEqual(dados["rotinas"][0], "Execução completa")
+        self.assertTrue(dados["celulas"]["Login"][0]["estimado"])          # histórico antigo
         self.assertEqual(dados["celulas"]["Pedidos de Compra"][-1]["status"], "lenta")
         self.assertIn("banco RPA.TIMER", dados["fonte"])
 
     def test_detalhe_e_404(self):
-        d = self.cliente.get("/api/execucoes/104").json()
+        d = self.cliente.get("/api/execucoes/104?dia=2026-11-19").json()
         self.assertEqual(d["id_execucao"], 104)
+        antiga = self.cliente.get("/api/execucoes/90?dia=2026-11-10").json()
+        self.assertEqual([s["nome"] for s in antiga["secoes"]], ["Login", "Pedidos de Compra"])
+        self.assertEqual(self.cliente.get("/api/execucoes/104?dia=19-11-2026").status_code, 422)
         self.assertEqual(self.cliente.get("/api/execucoes/999").status_code, 404)
 
     def test_banco_fora_do_ar_vira_503(self):

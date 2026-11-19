@@ -338,11 +338,24 @@ SELECT HORARIO_EXECUCAO, ERRO, DESCRICAO
 
 `api_mapa.py` é um serviço web que **lê o `RPA.TIMER` no momento do acesso** — junta as execuções de todas as máquinas e não depende do robô gerar arquivo.
 
+**Histórico completo.** O mapa mostra todas as versões do robô que gravaram no banco:
+
+| Período | Versão | O que aparece no mapa |
+|---|---|---|
+| até 10/09/2026 | Robô TIR (Selenium) | Só **Execução completa** (tempo total) |
+| 11/09 a 17/11/2026 | Playwright antigo | Execução completa + **Login e rotina estimados** (`~`), separados pelo registro "Acessando menu lateral" |
+| desde 18/11/2026 | Versão atual | Execução completa + Login e cada rotina **exatos** (linhas `Tempo ...`) |
+
+- A linha **Execução completa** é o tempo total de cada execução e existe em todas as versões — é a série histórica mais longa.
+- Valores com **`~`** são estimados: na versão antiga, a "rotina" inclui também o fechamento da tela. Rotinas antigas caem na mesma linha da rotina atual de mesmo nome (ex.: `Pedidos de Compra`).
+- Cada execução é identificada por **ID + dia**: o servidor e o PC de teste têm contadores de `ID_EXECUCAO` separados e podem repetir números.
+- O histórico é resumido **dentro do Oracle** (uma linha por execução), então períodos longos (até 2 anos) não trazem milhares de registros para o serviço.
+
 | Endereço | O que entrega |
 |---|---|
 | `/` | A página do mapa de calor |
 | `/api/mapa?dias=60` | A grade (Login/rotinas × execuções) já classificada |
-| `/api/execucoes/{id}` | O detalhe completo de uma execução |
+| `/api/execucoes/{id}?dia=AAAA-MM-DD` | O detalhe completo de uma execução |
 | `/health` | `{"status": "ok"}` — para monitoramento |
 | `/docs` | Documentação interativa da API (Swagger) |
 
@@ -352,7 +365,7 @@ SELECT HORARIO_EXECUCAO, ERRO, DESCRICAO
 - **passo a passo** da rotina escolhida — o que o robô estava fazendo e por quantos segundos (ex.: `procurando 'Visualizar'` — 22 s, com o passo mais demorado em destaque). Vem dos registros que o cronômetro grava a cada segundo, por isso mostra **onde** a lentidão aconteceu;
 - **avisos e erros** do log daquela execução (ex.: clique repetido, timeout).
 
-Na página também há o seletor **Histórico** (7 a 180 dias) e **Atualizar sozinho** (busca o banco de novo a cada minuto, sem recarregar).
+Na página também há o seletor **Histórico** (7 dias a 2 anos) e **Atualizar sozinho** (busca o banco de novo a cada minuto, sem recarregar).
 
 **Rodar no Windows:**
 

@@ -9,9 +9,11 @@ lê o banco NO MOMENTO DO ACESSO e entrega:
     GET /                          -> página do mapa de calor (mapa_calor_template.html)
     GET /api/mapa?dias=60          -> grade Login/rotinas x execuções, já classificada
                                       (normal/atenção/lenta/erro) - mapa_calor.calcular_mapa
-    GET /api/execucoes/{id}        -> detalhe completo de UMA execução: tempos, linha do
+    GET /api/execucoes/{id}?dia=   -> detalhe completo de UMA execução: tempos, linha do
                                       tempo do que o robô fez e avisos/erros
                                       - mapa_calor.carregar_detalhe_execucao
+                                      (o dia separa execuções de máquinas diferentes
+                                       que tenham o mesmo ID)
     GET /health                    -> verificação simples para monitoramento/Docker
     GET /docs                      -> documentação automática da API (Swagger)
 
@@ -84,7 +86,7 @@ def pagina() -> str:
 
 
 @app.get("/api/mapa", summary="Grade do mapa de calor")
-def api_mapa(dias: int = Query(60, ge=1, le=365, description="Período lido do banco")) -> dict:
+def api_mapa(dias: int = Query(60, ge=1, le=730, description="Período lido do banco (todo o histórico)")) -> dict:
     def gerar() -> dict:
         execucoes = mapa_calor.carregar_execucoes_banco(dias)
         return mapa_calor.calcular_mapa(execucoes, f"banco RPA.TIMER (últimos {dias} dias)")
@@ -96,13 +98,16 @@ def api_mapa(dias: int = Query(60, ge=1, le=365, description="Período lido do b
 
 
 @app.get("/api/execucoes/{id_execucao}", summary="Detalhe completo de uma execução")
-def api_execucao(id_execucao: int) -> dict:
+def api_execucao(
+    id_execucao: int,
+    dia: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="Dia da execução (AAAA-MM-DD)"),
+) -> dict:
     try:
-        detalhe = _em_cache(("execucao", id_execucao),
-                            lambda: mapa_calor.carregar_detalhe_execucao(id_execucao))
+        detalhe = _em_cache(("execucao", id_execucao, dia),
+                            lambda: mapa_calor.carregar_detalhe_execucao(id_execucao, dia))
     except Exception as erro:
         raise _erro_banco(erro) from erro
-    if not detalhe["tempos"] and not detalhe["secoes"]:
+    if detalhe["inicio"] is None:  # nenhuma linha no banco
         raise HTTPException(status_code=404, detail=f"Execução {id_execucao} não encontrada")
     return detalhe
 

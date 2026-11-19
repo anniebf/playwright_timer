@@ -136,6 +136,70 @@ class TestDetalheExecucao(unittest.TestCase):
         self.assertEqual((vazio["tempos"], vazio["secoes"]), ([], []))
 
 
+class TestHistoricoDoBanco(unittest.TestCase):
+    """montar_execucoes_banco: todas as versões do robô no mesmo mapa."""
+
+    def setUp(self):
+        from datetime import datetime as dt
+        from linhas_exemplo import (execucao_padrao, execucao_playwright_antiga, execucao_tir,
+                                    resumo_como_no_oracle, tempos_como_no_oracle)
+        self.dt = dt
+        execucoes = {
+            (10, "2026-09-01"): execucao_tir(dt(2026, 9, 1, 8, 30), 95),
+            (11, "2026-09-02"): execucao_tir(dt(2026, 9, 2, 8, 30), 120, sucesso=False),
+            (900, "2026-10-01"): execucao_playwright_antiga(dt(2026, 10, 1, 8, 30), login_s=40, rotina_s=25),
+            (901, "2026-10-02"): execucao_playwright_antiga(dt(2026, 10, 2, 8, 30), 38, 30, erro="Elemento 'Cancelar' não foi encontrado"),
+            # mesmo ID 2455 em dias diferentes (servidor x PC): NÃO pode juntar
+            (2455, "2026-11-18"): execucao_playwright_antiga(dt(2026, 11, 18, 9, 30), 41, 22),
+            (2455, "2026-11-19"): execucao_padrao(dt(2026, 11, 19, 8, 0)),
+        }
+        self.execs = mapa_calor.montar_execucoes_banco(resumo_como_no_oracle(execucoes), tempos_como_no_oracle(execucoes))
+        self.por_chave = {(e["id_execucao"], e["dia"]): e for e in self.execs}
+
+    def itens(self, chave):
+        return {r["nome"]: r for r in self.por_chave[chave]["rotinas"]}
+
+    def test_todas_as_execucoes_tem_o_total(self):
+        self.assertEqual(len(self.execs), 6)
+        self.assertTrue(all(e["rotinas"][0]["nome"] == "Execução completa" for e in self.execs))
+        self.assertEqual(self.itens((10, "2026-09-01"))["Execução completa"]["segundos"], 95)
+
+    def test_tir_so_tem_total_e_status(self):
+        self.assertEqual(list(self.itens((10, "2026-09-01"))), ["Execução completa"])
+        falha = self.itens((11, "2026-09-02"))["Execução completa"]
+        self.assertFalse(falha["sucesso"])
+        self.assertIn("PROTHEUS_TIR COM ERRO", falha["erro"])
+
+    def test_playwright_antigo_estima_login_e_rotina(self):
+        itens = self.itens((900, "2026-10-01"))
+        self.assertEqual(itens["Login"]["segundos"], 40)
+        # a rotina antiga cai na MESMA linha da rotina atual de nome igual
+        self.assertEqual(itens["Pedidos de Compra"]["segundos"], 25)
+        self.assertTrue(itens["Pedidos de Compra"]["estimado"])
+        erro = self.itens((901, "2026-10-02"))["Pedidos de Compra"]
+        self.assertFalse(erro["sucesso"])
+        self.assertIn("Cancelar", erro["erro"])
+
+    def test_mesmo_id_em_dias_diferentes_nao_mistura(self):
+        antiga, atual = self.itens((2455, "2026-11-18")), self.itens((2455, "2026-11-19"))
+        self.assertTrue(antiga["Login"]["estimado"])
+        self.assertFalse(atual["Login"].get("estimado", False))
+        self.assertEqual(set(atual), {"Execução completa", "Login", "Pedidos de Compra", "Documento de entrada"})
+
+    def test_ordem_das_linhas_no_mapa(self):
+        mapa = mapa_calor.calcular_mapa(self.execs, "teste")
+        self.assertEqual(mapa["rotinas"][:3], ["Execução completa", "Login", "Pedidos de Compra"])
+        self.assertEqual(mapa["colunas"][0]["origem"], "TIR (robô antigo: só o tempo total)")
+        self.assertTrue(mapa["celulas"]["Login"][2]["estimado"])
+
+    def test_nome_da_rotina_antiga(self):
+        f = mapa_calor.nome_rotina_legada
+        self.assertEqual(f("[0040s] - Acessando menu lateral: Compras > Movimento > Pedidos de Compra", []), "Pedidos de Compra")
+        self.assertEqual(f("[OK] Executando fluxo configurado: Compras > Movimento > Pedidos de Compra > Visualizar",
+                           ["Pedidos de Compra"]), "Pedidos de Compra")
+        self.assertEqual(f(None, []), "Rotina (registro antigo)")
+
+
 class TestArquivos(unittest.TestCase):
     def test_gera_html_e_ignora_json_invalido(self):
         with tempfile.TemporaryDirectory() as pasta:

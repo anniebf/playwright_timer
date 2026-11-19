@@ -11,8 +11,14 @@ LÓGICA GERAL
      execuções de qualquer máquina (servidor Docker, PC de teste...).
    - arquivos: log_playwright/tempos_rotinas_<id>.json (só da máquina local).
      Usado automaticamente se o banco estiver indisponível.
+   HISTÓRICO: as linhas "Tempo ..." só existem desde 18/11/2026. Para as execuções
+   anteriores (robô TIR e Playwright antigo) o mapa usa um resumo agregado no
+   próprio Oracle (SQL_RESUMO_EXECUCOES): tempo total de cada execução e, no
+   Playwright antigo, Login/rotina ESTIMADOS pelo registro "Acessando menu lateral"
+   (ver montar_execucoes_banco). Execuções são identificadas por ID + DIA, porque
+   o servidor e o PC de teste têm contadores de ID separados (podem repetir).
 2. Este módulo transforma essas linhas em uma grade:
-       linhas  = Login + rotinas
+       linhas  = Execução completa (tempo total) + Login + rotinas
        colunas = execuções (mais antiga -> mais recente)
        célula  = tempo daquela rotina naquela execução
 3. Para cada célula calcula o "normal" da rotina: a MEDIANA dos tempos das
@@ -107,15 +113,17 @@ def linhas_para_execucoes(linhas) -> list[dict]:
     """Converte linhas (ID_EXECUCAO, DESCRICAO, HORARIO_EXECUCAO) no mesmo formato dos JSONs.
 
     Linhas que não são do formato "Tempo ..." são ignoradas (ex.: logs parecidos).
-    A data da execução é o horário da primeira linha de tempo daquele ID.
+    A execução é identificada por ID + DIA (IDs podem se repetir entre máquinas);
+    a data dela é o horário da primeira linha de tempo.
     """
     por_id: dict = {}
     for id_execucao, descricao, horario in linhas:
         achado = LINHA_TEMPO.match(str(descricao or "").strip())
         if not achado:
             continue
-        execucao = por_id.setdefault(id_execucao, {
+        execucao = por_id.setdefault((id_execucao, horario.date()), {
             "id_execucao": id_execucao,
+            "dia": horario.strftime("%Y-%m-%d"),
             "gerado_em": horario.strftime("%Y-%m-%d %H:%M:%S"),
             "rotinas": [],
         })
@@ -128,6 +136,120 @@ def linhas_para_execucoes(linhas) -> list[dict]:
             "erro": "" if sucesso else (achado.group("erro") or "erro"),
         })
     return sorted(por_id.values(), key=lambda e: (e["gerado_em"], e["id_execucao"]))
+
+
+# ---------------------------------------------------------------------------
+# 1a) Histórico completo: uma linha por execução, agregada no Oracle
+# ---------------------------------------------------------------------------
+NOME_TOTAL = "Execução completa"
+
+# Para cada execução (ID + dia) o Oracle devolve só o essencial, em vez de trazer
+# os milhares de registros por segundo:
+#   TOTAL           maior TEMPO_EXECUCAO = linha de encerramento (todas as versões do robô)
+#   STATUS_FINAL    ERRO dessa linha: NAO/OK = sucesso; SIM/ERRO = falha
+#   LINHAS_TEMPO    > 0 -> versão atual (tem "Tempo Login"/"Tempo Rotina" exatos)
+#   ERA_TIR         robô antigo (TIR/Selenium): só há o tempo total
+#   INICIO_MENU     Playwright antigo: quando começou a navegação no menu (= fim do login)
+#   CAMINHO         texto com o caminho da rotina antiga (para dar nome à linha)
+# DESCRICAO pode ser CLOB: TO_CHAR(SUBSTR(...)) permite MAX/KEEP sem erro de tipo.
+SQL_RESUMO_EXECUCOES = """
+    SELECT ID_EXECUCAO,
+           MIN(HORARIO_EXECUCAO) AS INICIO,
+           MAX(TEMPO_EXECUCAO) AS TOTAL,
+           MAX(ERRO) KEEP (DENSE_RANK LAST ORDER BY TEMPO_EXECUCAO, HORARIO_EXECUCAO) AS STATUS_FINAL,
+           MAX(TO_CHAR(SUBSTR(DESCRICAO, 1, 300)))
+               KEEP (DENSE_RANK LAST ORDER BY TEMPO_EXECUCAO, HORARIO_EXECUCAO) AS DESCRICAO_FINAL,
+           SUM(CASE WHEN DESCRICAO LIKE '%- Tempo Login:%' THEN 1 ELSE 0 END) AS LINHAS_TEMPO,
+           MAX(CASE WHEN DESCRICAO LIKE '%PROTHEUS_TIR%' THEN 1 ELSE 0 END) AS ERA_TIR,
+           MIN(CASE WHEN DESCRICAO LIKE '%Acessando menu lateral:%'
+                      OR DESCRICAO LIKE '%Executando fluxo configurado:%'
+                      OR DESCRICAO LIKE '%Rotina 1/%iniciada%'
+                    THEN HORARIO_EXECUCAO END) AS INICIO_MENU,
+           MAX(CASE WHEN DESCRICAO LIKE '%Acessando menu lateral:%'
+                      OR DESCRICAO LIKE '%Executando fluxo configurado:%'
+                    THEN TO_CHAR(SUBSTR(DESCRICAO, 1, 300)) END) AS CAMINHO
+      FROM RPA.TIMER
+     WHERE SISTEMA = :sistema
+       AND HORARIO_EXECUCAO >= SYSDATE - :dias
+     GROUP BY ID_EXECUCAO, TRUNC(HORARIO_EXECUCAO)
+    HAVING MAX(TEMPO_EXECUCAO) > 0
+"""
+PREFIXO_REGISTRO = re.compile(r"^\[(?:\d+s|[A-Z]+)\]\s*-?\s*")   # "[0042s] - " ou "[OK] "
+
+
+def _limpar_descricao(texto) -> str:
+    """Tira o prefixo "[0042s] - " / "[OK] " e espaços repetidos."""
+    return " ".join(PREFIXO_REGISTRO.sub("", str(texto or "").strip()).split())
+
+
+def nome_rotina_legada(caminho: str | None, nomes_conhecidos: list[str]) -> str:
+    """Dá nome à rotina de uma execução antiga a partir do texto do caminho.
+
+    Ex.: "Acessando menu lateral: Compras > Movimento > Pedidos de Compra" -> "Pedidos de Compra".
+    Se alguma etapa tem o nome de uma rotina já conhecida (das execuções atuais), usa esse
+    nome, para o histórico antigo cair na MESMA linha do mapa.
+    """
+    if not caminho:
+        return "Rotina (registro antigo)"
+    texto = _limpar_descricao(caminho)
+    trecho = texto.split(":", 1)[1] if ":" in texto else texto
+    etapas = [e.strip() for e in trecho.split(">") if e.strip()]
+    conhecidos = {n.casefold(): n for n in nomes_conhecidos}
+    for etapa in etapas:
+        if etapa.casefold() in conhecidos:
+            return conhecidos[etapa.casefold()]
+    if "menu lateral" in texto.lower() and etapas:
+        return etapas[-1]          # o caminho antigo do menu terminava na rotina
+    return etapas[2] if len(etapas) >= 3 else (trecho or "Rotina (registro antigo)")
+
+
+def montar_execucoes_banco(resumos, linhas_tempo) -> list[dict]:
+    """Junta o resumo de TODAS as execuções com os tempos exatos da versão atual.
+
+    resumos: linhas do SQL_RESUMO_EXECUCOES; linhas_tempo: linhas do SQL_TEMPOS.
+    Cada execução ganha o item "Execução completa" (tempo total). Além disso:
+    - versão atual: Login e rotinas exatos (linhas "Tempo ...");
+    - Playwright antigo: Login e rotina ESTIMADOS (estimado=True) pelo início do menu;
+    - TIR: só o tempo total.
+    """
+    atuais = {(e["id_execucao"], e["dia"]): e for e in linhas_para_execucoes(linhas_tempo)}
+    nomes_conhecidos = [r["nome"] for e in atuais.values() for r in e["rotinas"] if r["nome"] != "Login"]
+
+    execucoes = []
+    for (id_execucao, inicio, total, status_final, descricao_final,
+         linhas_tempo_qtd, era_tir, inicio_menu, caminho) in resumos:
+        dia = inicio.strftime("%Y-%m-%d")
+        total = float(total or 0)
+        sucesso_total = str(status_final or "").upper() in ("NAO", "OK")
+        erro_total = "" if sucesso_total else (_limpar_descricao(descricao_final) or "erro")
+        atual = atuais.pop((id_execucao, dia), None)  # mesma chave: ID + dia (texto AAAA-MM-DD)
+
+        if atual:
+            origem, itens = "atual", list(atual["rotinas"])
+        elif era_tir:
+            origem, itens = "TIR (robô antigo: só o tempo total)", []
+        else:
+            origem, itens = "Playwright antigo (Login/rotina estimados)", []
+            if inicio_menu is not None:
+                login_s = max(0.0, (inicio_menu - inicio).total_seconds())
+                itens.append({"nome": "Login", "segundos": login_s, "sucesso": True, "erro": "", "estimado": True})
+                itens.append({"nome": nome_rotina_legada(caminho, nomes_conhecidos),
+                              "segundos": max(0.0, total - login_s), "sucesso": sucesso_total,
+                              "erro": erro_total, "estimado": True})
+            elif not sucesso_total:
+                # falhou antes de chegar ao menu: o problema foi no login
+                itens.append({"nome": "Login", "segundos": total, "sucesso": False,
+                              "erro": erro_total, "estimado": True})
+
+        itens.insert(0, {"nome": NOME_TOTAL, "segundos": total, "sucesso": sucesso_total, "erro": erro_total})
+        execucoes.append({
+            "id_execucao": id_execucao, "dia": dia, "origem": origem,
+            "gerado_em": inicio.strftime("%Y-%m-%d %H:%M:%S"), "rotinas": itens,
+        })
+
+    # Execuções com tempos atuais mas fora do resumo (não deveria ocorrer): mantém mesmo assim.
+    execucoes.extend(dict(e, origem="atual") for e in atuais.values())
+    return sorted(execucoes, key=lambda e: (e["gerado_em"], str(e["id_execucao"])))
 
 
 def _consultar(sql: str, parametros: dict) -> list[tuple]:
@@ -147,8 +269,10 @@ def _consultar(sql: str, parametros: dict) -> list[tuple]:
 
 
 def carregar_execucoes_banco(dias: int = 60, sistema: str = "PROTHEUS") -> list[dict]:
-    """Lê as linhas "Tempo ..." do RPA.TIMER dos últimos `dias`."""
-    return linhas_para_execucoes(_consultar(SQL_TEMPOS, {"sistema": sistema, "dias": dias}))
+    """Lê do RPA.TIMER o histórico completo dos últimos `dias` (todas as versões do robô)."""
+    parametros = {"sistema": sistema, "dias": dias}
+    return montar_execucoes_banco(_consultar(SQL_RESUMO_EXECUCOES, parametros),
+                                  _consultar(SQL_TEMPOS, parametros))
 
 
 # ---------------------------------------------------------------------------
@@ -163,10 +287,13 @@ SQL_EXECUCAO = """
       FROM RPA.TIMER
      WHERE ID_EXECUCAO = :id_execucao
        AND SISTEMA = :sistema
+       AND (:dia IS NULL OR TRUNC(HORARIO_EXECUCAO) = TO_DATE(:dia, 'YYYY-MM-DD'))
      ORDER BY HORARIO_EXECUCAO
 """
 PREFIXO_SEGUNDOS = re.compile(r"^\[(\d+)s\] - (.*)$", re.DOTALL)
 INICIO_ROTINA = re.compile(r"^Rotina (\d+)/\d+")
+# Playwright antigo: o início da navegação no menu marca o fim do login
+INICIO_ROTINA_ANTIGA = re.compile(r"^(Acessando menu lateral|Executando fluxo configurado):")
 
 
 def montar_detalhe(id_execucao: int, linhas) -> dict:
@@ -226,6 +353,8 @@ def montar_detalhe(id_execucao: int, linhas) -> dict:
         if rotina:
             indice = int(rotina.group(1))
             nome_secao = nomes_rotinas[indice - 1] if indice <= len(nomes_rotinas) else f"Rotina {indice}"
+        elif INICIO_ROTINA_ANTIGA.match(texto) and nome_secao == "Login":
+            nome_secao = nome_rotina_legada(texto, nomes_rotinas)
         if secao_atual is None or secao_atual["nome"] != nome_secao:
             secao_atual = {"nome": nome_secao, "passos": []}
             secoes.append(secao_atual)
@@ -255,9 +384,10 @@ def montar_detalhe(id_execucao: int, linhas) -> dict:
     }
 
 
-def carregar_detalhe_execucao(id_execucao: int, sistema: str = "PROTHEUS") -> dict:
-    """Busca no RPA.TIMER todas as linhas da execução e monta o detalhe."""
-    return montar_detalhe(id_execucao, _consultar(SQL_EXECUCAO, {"id_execucao": id_execucao, "sistema": sistema}))
+def carregar_detalhe_execucao(id_execucao: int, dia: str | None = None, sistema: str = "PROTHEUS") -> dict:
+    """Busca no RPA.TIMER todas as linhas da execução (ID + dia) e monta o detalhe."""
+    linhas = _consultar(SQL_EXECUCAO, {"id_execucao": id_execucao, "sistema": sistema, "dia": dia})
+    return montar_detalhe(id_execucao, linhas)
 
 
 # ---------------------------------------------------------------------------
@@ -279,22 +409,28 @@ def classificar(segundos: float, normal: float | None, sucesso: bool, erro: str)
 
 def calcular_mapa(execucoes: list[dict], fonte: str = "arquivos") -> dict:
     """Monta a estrutura usada pelo HTML: colunas, linhas e células classificadas."""
-    # Ordem das linhas: Login primeiro, depois as rotinas na ordem em que aparecem.
+    # Ordem das linhas: Execução completa, Login e as rotinas na ordem em que aparecem.
     rotinas: list[str] = []
     for execucao in execucoes:
         for item in execucao["rotinas"]:
             if item.get("nome") and item["nome"] not in rotinas:
                 rotinas.append(item["nome"])
-    if "Login" in rotinas:
-        rotinas.remove("Login")
-        rotinas.insert(0, "Login")
+    for fixo in ("Login", NOME_TOTAL):
+        if fixo in rotinas:
+            rotinas.remove(fixo)
+            rotinas.insert(0, fixo)
 
     historico: dict[str, list[float]] = {nome: [] for nome in rotinas}  # tempos sem erro
     celulas: dict[str, list[dict | None]] = {nome: [] for nome in rotinas}
     colunas = []
 
     for execucao in execucoes:
-        colunas.append({"id": execucao.get("id_execucao"), "data": execucao["gerado_em"]})
+        colunas.append({
+            "id": execucao.get("id_execucao"),
+            "data": execucao["gerado_em"],
+            "dia": execucao.get("dia") or execucao["gerado_em"][:10],
+            "origem": execucao.get("origem", "atual"),
+        })
         por_nome = {item.get("nome"): item for item in execucao["rotinas"]}
 
         for nome in rotinas:
@@ -317,6 +453,7 @@ def calcular_mapa(execucoes: list[dict], fonte: str = "arquivos") -> dict:
                 "status": status,
                 "erro": erro[:300],
                 "caminho": item.get("caminho", ""),
+                "estimado": bool(item.get("estimado")),  # registro antigo: tempo estimado
             })
             # Só tempos sem erro entram no histórico que define o "normal".
             if sucesso:
