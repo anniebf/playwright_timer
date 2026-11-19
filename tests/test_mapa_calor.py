@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # linhas_exemplo.py
 
 import mapa_calor  # noqa: E402
 
@@ -97,6 +98,42 @@ class TestLinhasDoBanco(unittest.TestCase):
         finally:
             mapa_calor.carregar_execucoes_banco = original
         self.assertIn("arquivos locais", html)
+
+
+class TestDetalheExecucao(unittest.TestCase):
+    """montar_detalhe: transforma as linhas de UMA execução no painel de detalhe."""
+
+    def setUp(self):
+        from datetime import datetime as dt
+        from linhas_exemplo import execucao_padrao
+        self.detalhe = mapa_calor.montar_detalhe(
+            42, execucao_padrao(dt(2026, 11, 19, 8, 0, 0), visualizar_s=18, erro="Elemento 'Cancelar' não foi encontrado"))
+
+    def test_tempos_e_final(self):
+        nomes = [t["nome"] for t in self.detalhe["tempos"]]
+        self.assertEqual(nomes, ["Login", "Pedidos de Compra", "Documento de entrada"])
+        self.assertEqual(self.detalhe["tempos"][0]["segundos"], 27.0)
+        self.assertFalse(self.detalhe["tempos"][1]["sucesso"])
+        self.assertIn("Cancelar", self.detalhe["tempos"][1]["erro"])
+        self.assertTrue(self.detalhe["final"]["texto"].startswith("ERRO EM ROTINA(S)"))
+
+    def test_linha_do_tempo_por_secao(self):
+        secoes = {s["nome"]: s["passos"] for s in self.detalhe["secoes"]}
+        self.assertEqual(list(secoes), ["Login", "Pedidos de Compra", "Documento de entrada"])
+        # registros por segundo repetidos viram UM passo com a duração somada
+        visualizar = [p for p in secoes["Pedidos de Compra"] if "Visualizar" in p["acao"]]
+        self.assertEqual(len(visualizar), 1)
+        self.assertEqual(visualizar[0]["duracao_s"], 18)
+        self.assertEqual(secoes["Login"][2]["duracao_s"], 12)   # espera do MFA
+
+    def test_eventos_so_avisos_e_erros(self):
+        niveis = {e["nivel"] for e in self.detalhe["eventos"]}
+        self.assertTrue(niveis <= {"WARN", "ERRO"})
+        self.assertTrue(any("clicando de novo" in e["texto"] for e in self.detalhe["eventos"]))
+
+    def test_execucao_inexistente(self):
+        vazio = mapa_calor.montar_detalhe(99, [])
+        self.assertEqual((vazio["tempos"], vazio["secoes"]), ([], []))
 
 
 class TestArquivos(unittest.TestCase):

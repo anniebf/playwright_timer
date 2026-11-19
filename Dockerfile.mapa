@@ -1,0 +1,40 @@
+# =====================================================================
+# Dockerfile.mapa - serviço web do mapa de calor (api_mapa.py)
+#
+# Imagem leve e SEPARADA da do robô: só Python + FastAPI + oracledb.
+# O oracledb roda no modo "thin" (sem Oracle Instant Client).
+# As credenciais do banco vêm do .env montado em /app/.env (não vão para a imagem).
+#
+#   docker build -f Dockerfile.mapa -t hiannyurt/protheus-timer-mapa:latest .
+#   docker run -d --name mapa-protheus --restart unless-stopped -p 8010:8010 \
+#     -v /python_bf/playwright_timer/.env:/app/.env:ro \
+#     -v /etc/localtime:/etc/localtime:ro \
+#     hiannyurt/protheus-timer-mapa:latest
+# =====================================================================
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    MAPA_HOST=0.0.0.0 \
+    MAPA_PORTA=8010
+
+WORKDIR /app
+
+# Dependências primeiro: a camada fica em cache enquanto o requirements não mudar.
+COPY requirements-mapa.txt .
+RUN pip install --no-cache-dir -r requirements-mapa.txt
+
+# Só o que o serviço usa.
+COPY api_mapa.py mapa_calor.py mapa_calor_template.html ./
+
+# Não roda como root.
+RUN useradd --create-home --uid 1000 mapa
+USER mapa
+
+EXPOSE 8010
+
+# O Docker marca o container como "unhealthy" se o serviço parar de responder.
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=4)" || exit 1
+
+CMD ["python", "api_mapa.py"]

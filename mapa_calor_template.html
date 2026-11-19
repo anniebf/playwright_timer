@@ -3,8 +3,11 @@
   mapa_calor_template.html - Template do mapa de calor dos tempos das rotinas.
 
   LÓGICA GERAL
-  - O Python (mapa_calor.py) substitui o marcador de dados no <script> abaixo
-    pelo JSON já calculado: colunas (execuções), rotinas e células com status.
+  - Dois modos:
+    * SERVIÇO (api_mapa.py): a página vem sem dados e busca /api/mapa; ao clicar numa
+      célula busca /api/execucoes/{id} e mostra o detalhe completo da execução.
+    * ARQUIVO: o mapa_calor.py substitui o marcador de dados no <script> abaixo pelo
+      JSON já calculado (log_playwright/mapa_calor.html, funciona offline).
   - Este arquivo só DESENHA: aplica os filtros, monta a grade, o tooltip, os
     cartões de resumo e a visão em tabela. Nenhum cálculo de "normal" é feito aqui.
   - Autocontido: sem bibliotecas externas, abre offline.
@@ -135,6 +138,35 @@
   .lista td.num { text-align: right; font-variant-numeric: tabular-nums; }
   .vazio-msg { padding: 32px; text-align: center; color: var(--ink-3); }
   .nota { color: var(--ink-3); font-size: 12px; margin-top: 10px; }
+  /* ---------- Aviso (erro ao buscar dados no serviço) ---------- */
+  .aviso { background: var(--surface); border: 1px solid var(--erro-bg); border-left-width: 4px; border-radius: 8px;
+           padding: 10px 14px; margin-bottom: 12px; color: var(--ink); }
+
+  /* ---------- Painel de detalhe da execução (modo serviço) ---------- */
+  .detalhe { margin-top: 16px; padding: 16px 18px; }
+  .detalhe header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+  .detalhe h2 { font-size: 17px; margin: 0; }
+  .detalhe .fechar { margin-left: auto; font: inherit; border: 1px solid var(--hair); background: var(--surface-2);
+                     color: var(--ink-2); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  .detalhe h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-3); margin: 16px 0 8px; }
+  .tempos { display: flex; flex-wrap: wrap; gap: 8px; }
+  .tempo { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--hair); border-radius: 8px;
+           padding: 5px 10px; background: var(--surface-2); cursor: pointer; font: inherit; color: var(--ink); }
+  .tempo[aria-pressed="true"] { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
+  .tempo b { font-variant-numeric: tabular-nums; }
+  table.passos { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .passos td { padding: 5px 8px; border-bottom: 1px solid var(--hair); vertical-align: middle; }
+  .passos td.hora { color: var(--ink-3); white-space: nowrap; font-variant-numeric: tabular-nums; width: 70px; }
+  .passos td.dur { width: 34%; }
+  .passos .barra { display: flex; align-items: center; gap: 8px; }
+  .passos .barra span.b { height: 10px; border-radius: 0 4px 4px 0; background: var(--ink-3); opacity: .45; min-width: 2px; }
+  .passos tr.maior .barra span.b { opacity: 1; background: var(--ink-2); }
+  .passos .barra em { font-style: normal; font-variant-numeric: tabular-nums; color: var(--ink-2); white-space: nowrap; }
+  .passos tr.maior td.acao { font-weight: 650; }
+  .eventos { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+  .eventos li { padding: 5px 0; border-bottom: 1px solid var(--hair); display: flex; gap: 10px; }
+  .eventos .hora { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+  .modo-servico .cell:not(.st-vazio) { cursor: pointer; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -143,9 +175,19 @@
   <h1>Mapa de calor - tempo das rotinas Protheus</h1>
   <p class="sub" id="sub"></p>
 
+  <div class="aviso" id="aviso" role="alert" hidden></div>
   <section class="tiles" id="tiles" aria-label="Resumo da última execução"></section>
 
   <div class="filters" role="group" aria-label="Filtros">
+    <label id="f-dias-label" hidden>Histórico
+      <select id="f-dias">
+        <option value="7">7 dias</option>
+        <option value="30">30 dias</option>
+        <option value="60" selected>60 dias</option>
+        <option value="90">90 dias</option>
+        <option value="180">180 dias</option>
+      </select>
+    </label>
     <label>Período
       <select id="f-periodo">
         <option value="10">Últimas 10 execuções</option>
@@ -167,7 +209,7 @@
       <button type="button" data-visao="mapa" aria-pressed="true">Mapa</button>
       <button type="button" data-visao="tabela" aria-pressed="false">Tabela</button>
     </span>
-    <label title="Recarrega a página a cada 5 minutos para pegar execuções novas">
+    <label id="f-auto-label" title="Recarrega a página a cada 5 minutos para pegar execuções novas">
       <input type="checkbox" id="f-auto"> Atualizar sozinho
     </label>
   </div>
@@ -178,13 +220,16 @@
     <div class="scroll" id="mapa"></div>
     <div id="tabela" hidden></div>
   </div>
+  <section class="card detalhe" id="detalhe" aria-live="polite" hidden></section>
   <p class="nota" id="nota"></p>
 </div>
 <div class="tip" id="tip" role="tooltip"></div>
 
 <script>
 /* Dados injetados pelo mapa_calor.py (não editar à mão). */
-const DADOS = /*__DADOS__*/null;
+let DADOS = /*__DADOS__*/null;
+/* Sem dados embutidos e aberta por http(s) = página servida pelo api_mapa.py. */
+const MODO_SERVICO = !DADOS && location.protocol.startsWith("http");
 
 /* ---------- Definição dos status: cor + ícone + texto (nunca só cor) ---------- */
 const STATUS = {
@@ -198,7 +243,7 @@ const STATUS = {
 const PROBLEMA = new Set(["atencao", "lenta", "erro", "pulada"]);
 
 /* ---------- Estado da tela (filtros) - lembrado entre aberturas, se possível ---------- */
-const estado = { periodo: 30, busca: "", problemas: false, valor: "s", visao: "mapa", auto: false };
+const estado = { periodo: 30, busca: "", problemas: false, valor: "s", visao: "mapa", auto: false, dias: 60 };
 try { Object.assign(estado, JSON.parse(localStorage.getItem("mapaCalorFiltros") || "{}")); } catch (e) {}
 const salvarEstado = () => { try { localStorage.setItem("mapaCalorFiltros", JSON.stringify(estado)); } catch (e) {} };
 
@@ -335,9 +380,13 @@ $("mapa").addEventListener("mousemove", e => { const b = e.target.closest("butto
 $("mapa").addEventListener("mouseleave", esconderTip);
 $("mapa").addEventListener("focusin", e => { const b = e.target.closest("button.cell"); if (b) { const q = b.getBoundingClientRect(); mostrarTip(b, q.right, q.top); } });
 $("mapa").addEventListener("focusout", esconderTip);
+$("mapa").addEventListener("click", e => {
+  const b = e.target.closest("button.cell"); if (b && MODO_SERVICO) abrirDetalhe(b.dataset.r, +b.dataset.i);
+});
 
 /* ---------- Filtros: ligam o estado e redesenham ---------- */
 function desenhar() {
+  if (!DADOS) return;  // modo serviço: dados ainda carregando
   $("mapa").hidden = estado.visao !== "mapa"; $("tabela").hidden = estado.visao !== "tabela";
   estado.visao === "mapa" ? desenharMapa() : desenharTabela();
   salvarEstado();
@@ -347,6 +396,7 @@ function ligarFiltros() {
   $("f-busca").value = estado.busca;
   $("f-problemas").checked = estado.problemas;
   $("f-auto").checked = estado.auto;
+  $("f-dias").value = String(estado.dias);
   document.querySelectorAll("[data-valor]").forEach(b => b.setAttribute("aria-pressed", b.dataset.valor === estado.valor));
   document.querySelectorAll("[data-visao]").forEach(b => b.setAttribute("aria-pressed", b.dataset.visao === estado.visao));
 
@@ -354,33 +404,113 @@ function ligarFiltros() {
   $("f-busca").oninput = e => { estado.busca = e.target.value; desenhar(); };
   $("f-problemas").onchange = e => { estado.problemas = e.target.checked; desenhar(); };
   $("f-auto").onchange = e => { estado.auto = e.target.checked; salvarEstado(); agendarAtualizacao(); };
+  $("f-dias").onchange = e => { estado.dias = +e.target.value; salvarEstado(); carregarDoServico(); };
   document.querySelectorAll("[data-valor]").forEach(b => b.onclick = () => {
     estado.valor = b.dataset.valor; ligarFiltros(); desenhar(); });
   document.querySelectorAll("[data-visao]").forEach(b => b.onclick = () => {
     estado.visao = b.dataset.visao; ligarFiltros(); desenhar(); });
 }
 
-/* "Atualizar sozinho": recarrega a página para ler o HTML regerado pela próxima execução. */
+/* "Atualizar sozinho": no serviço busca os dados de novo a cada 1 min (sem recarregar a página);
+   no arquivo, recarrega a página a cada 5 min para ler o HTML regerado pela próxima execução. */
 let timerAtualizacao = null;
 function agendarAtualizacao() {
   clearTimeout(timerAtualizacao);
-  if (estado.auto) timerAtualizacao = setTimeout(() => location.reload(), 5 * 60 * 1000);
+  if (!estado.auto) return;
+  timerAtualizacao = MODO_SERVICO
+    ? setTimeout(() => carregarDoServico().finally(agendarAtualizacao), 60 * 1000)
+    : setTimeout(() => location.reload(), 5 * 60 * 1000);
+}
+
+/* ---------- Modo serviço: busca dos dados na API ---------- */
+function mostrarAviso(msg) { $("aviso").hidden = !msg; $("aviso").textContent = msg || ""; }
+async function buscarJson(url) {
+  const r = await fetch(url, { headers: { Accept: "application/json" } });
+  const corpo = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(corpo.detail || `Erro ${r.status} em ${url}`);
+  return corpo;
+}
+async function carregarDoServico() {
+  try {
+    DADOS = await buscarJson(`api/mapa?dias=${estado.dias}`);
+    mostrarAviso(""); desenharTudo();
+  } catch (e) {
+    mostrarAviso(`Não foi possível carregar os dados: ${e.message}`);
+  }
+}
+
+/* ---------- Detalhe de uma execução (clique numa célula) ---------- */
+let detalheAtual = null;
+async function abrirDetalhe(rotina, i) {
+  const col = DADOS.colunas[i];
+  const painel = $("detalhe");
+  painel.hidden = false;
+  painel.innerHTML = `<p class="nota">Carregando a execução ${esc(col.id)}...</p>`;
+  painel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  try {
+    detalheAtual = await buscarJson(`api/execucoes/${encodeURIComponent(col.id)}`);
+    desenharDetalhe(rotina);
+  } catch (e) {
+    painel.innerHTML = `<div class="aviso">Não foi possível carregar o detalhe: ${esc(e.message)}</div>`;
+  }
+}
+function desenharDetalhe(secaoEscolhida) {
+  const d = detalheAtual, painel = $("detalhe");
+  const secao = d.secoes.find(s => s.nome === secaoEscolhida) || d.secoes[0];
+  const maior = secao ? Math.max(...secao.passos.map(p => p.duracao_s)) : 0;
+  const tempos = d.tempos.map(t => `<button type="button" class="tempo" data-secao="${esc(t.nome)}"
+      aria-pressed="${secao && t.nome === secao.nome}"><span class="chip st-${t.sucesso ? "normal" : "erro"}">${t.sucesso ? "✓" : "✕"}</span>
+      ${esc(t.nome)} <b>${fmtS(t.segundos)}</b></button>`).join("");
+  const passos = secao ? secao.passos.map(p => `<tr class="${p.duracao_s === maior && maior >= 3 ? "maior" : ""}">
+      <td class="hora">${esc(p.hora)}</td><td class="acao">${esc(p.acao)}</td>
+      <td class="dur"><div class="barra"><span class="b" style="width:${Math.max(2, Math.round(p.duracao_s / maior * 100))}%"></span>
+      <em>${p.duracao_s}s</em></div></td></tr>`).join("") : "";
+  const erroItem = d.tempos.find(t => secao && t.nome === secao.nome && !t.sucesso);
+  const eventos = d.eventos.map(ev => `<li><span class="hora">${esc(ev.hora)}</span>
+      <span class="chip st-${ev.nivel === "ERRO" ? "erro" : "atencao"}">${ev.nivel === "ERRO" ? "✕" : "▲"}</span><span>${esc(ev.texto)}</span></li>`).join("");
+  const ini = d.inicio ? fmtData(d.inicio).completa : "-";
+  painel.innerHTML = `
+    <header><h2>Execução ${esc(d.id_execucao)} · ${ini}</h2>
+      <span class="nota">${d.final ? `Total ${fmtS(d.final.total_segundos)} · ${esc(d.final.texto)}` : ""}</span>
+      <button type="button" class="fechar" id="fechar-detalhe">Fechar</button></header>
+    <h3>Tempos desta execução (clique para ver o passo a passo)</h3>
+    <div class="tempos">${tempos || '<span class="nota">Sem tempos registrados.</span>'}</div>
+    ${erroItem ? `<div class="aviso" style="margin-top:12px"><b>Erro:</b> ${esc(erroItem.erro)}</div>` : ""}
+    <h3>Passo a passo${secao ? ` - ${esc(secao.nome)}` : ""} (onde o tempo foi gasto)</h3>
+    ${passos ? `<table class="passos"><tbody>${passos}</tbody></table>` : '<p class="nota">Sem registros por segundo para este item.</p>'}
+    <h3>Avisos e erros da execução</h3>
+    ${eventos ? `<ul class="eventos">${eventos}</ul>` : '<p class="nota">Nenhum aviso ou erro.</p>'}`;
+  $("fechar-detalhe").onclick = () => { painel.hidden = true; };
+  painel.querySelectorAll("button.tempo").forEach(b => b.onclick = () => desenharDetalhe(b.dataset.secao));
 }
 
 /* ---------- Inicialização ---------- */
-/* Aberto o MODELO (sem dados): orienta a abrir o arquivo gerado, em vez de quebrar a página. */
-if (!DADOS) {
+function desenharTudo() {
+  const g = fmtData(DADOS.gerado_em);
+  $("sub").textContent = `${DADOS.colunas.length} execuções · ${DADOS.rotinas.length} itens (login + rotinas) · fonte: ${DADOS.fonte || "-"} · atualizado em ${g.completa}`;
+  $("nota").textContent = `"Normal" = mediana das últimas ${DADOS.parametros.janela} execuções sem erro da mesma rotina, anteriores a cada célula. ` +
+    (MODO_SERVICO ? `Clique numa célula para ver o passo a passo daquela execução.` : `Passe o mouse (ou use Tab) nas células para ver detalhes.`);
+  desenharResumo(); desenharLegenda(); desenhar();
+}
+
+if (MODO_SERVICO) {
+  // Página servida pelo api_mapa.py: dados vêm do banco a cada carga.
+  document.body.classList.add("modo-servico");
+  $("f-dias-label").hidden = false;
+  $("f-auto-label").title = "Busca os dados no banco de novo a cada 1 minuto";
+  ligarFiltros(); agendarAtualizacao();
+  $("sub").textContent = "Carregando dados do banco...";
+  carregarDoServico();
+} else if (DADOS) {
+  // Arquivo gerado pelo mapa_calor.py (dados embutidos).
+  ligarFiltros(); desenharTudo(); agendarAtualizacao();
+} else {
+  // Aberto o MODELO (sem dados) direto do disco: orienta em vez de quebrar a página.
   document.querySelector(".page").innerHTML = `<h1>Mapa de calor - tempo das rotinas Protheus</h1>
     <div class="card vazio-msg">Este arquivo é apenas o <b>modelo</b> do mapa (sem dados).<br>
-    Abra <b>log_playwright\\mapa_calor.html</b>, gerado ao final de cada execução,<br>
-    ou gere agora com: <code>python mapa_calor.py log_playwright</code></div>`;
-  throw new Error("Modelo sem dados: abra log_playwright/mapa_calor.html");
+    Abra o serviço (<code>python api_mapa.py</code> e acesse http://localhost:8010) ou<br>
+    o arquivo <b>log_playwright\\mapa_calor.html</b>, gerado ao final de cada execução.</div>`;
 }
-const g = fmtData(DADOS.gerado_em);
-$("sub").textContent = `${DADOS.colunas.length} execuções · ${DADOS.rotinas.length} itens (login + rotinas) · fonte: ${DADOS.fonte || "-"} · atualizado em ${g.completa}`;
-$("nota").textContent = `"Normal" = mediana das últimas ${DADOS.parametros.janela} execuções sem erro da mesma rotina, anteriores a cada célula. ` +
-  `Passe o mouse (ou use Tab) nas células para ver detalhes.`;
-desenharResumo(); desenharLegenda(); ligarFiltros(); desenhar(); agendarAtualizacao();
 </script>
 </body>
 </html>

@@ -63,8 +63,11 @@ playwright_timer/
 ├── graph.py                    # Lê o código MFA no e-mail (Microsoft Graph)
 ├── MandaEmail.py               # E-mails de alerta (SMTP)
 ├── logging_config.py           # Log geral + um log por rotina
-├── mapa_calor.py               # Gera o mapa de calor (lê o RPA.TIMER)
-├── mapa_calor_template.html    # Modelo visual do mapa de calor (não abrir direto)
+├── mapa_calor.py               # Regras do mapa de calor: lê o RPA.TIMER, calcula o "normal", detalhe da execução
+├── mapa_calor_template.html    # Página do mapa (usada pelo serviço e pelo arquivo; não abrir direto)
+├── api_mapa.py                 # SERVIÇO web do mapa de calor (FastAPI)
+├── requirements-mapa.txt       # Dependências do serviço (sem Playwright)
+├── Dockerfile.mapa             # Imagem do serviço do mapa (separada da do robô)
 │
 ├── config.example.json         # ⇢ MODELO do config.json (copie e preencha)
 ├── .env.example                # ⇢ MODELO do .env (copie e preencha)
@@ -90,7 +93,8 @@ Responsabilidade de cada módulo, em uma frase:
 | `main_playwright.py` | Orquestra tudo. A classe `ProtheusPlaywrightMainFlow` sabe "mexer" no Protheus (login, menu, cliques confirmados); `exec_playwright_from_main()` amarra login → rotinas → resultados. |
 | `rotinas.py` | Converte `"Compras > Movimento > ..."` em etapas, valida a configuração e grava `tempos_rotinas_<id>.json`. |
 | `LogBanco.py` | `CronometroExecucao` grava no `RPA.TIMER` o andamento (1 linha/segundo), o tempo de cada item (`Tempo Login`, `Tempo Rotina`) e o fim da execução. |
-| `mapa_calor.py` | Lê as linhas `Tempo ...` do banco, calcula o "normal" de cada rotina e gera `mapa_calor.html`. |
+| `mapa_calor.py` | Lê as linhas `Tempo ...` do banco, calcula o "normal" de cada rotina, monta o detalhe de uma execução e gera `mapa_calor.html`. |
+| `api_mapa.py` | Serviço web (FastAPI) que entrega o mapa de calor lendo o banco a cada acesso. |
 | `erros_protheus.py` | Reconhece a janela TOTVS de licenças esgotadas e a transforma num erro próprio (sem novas tentativas). |
 
 ---
@@ -293,7 +297,8 @@ No Windows (PowerShell), troque os caminhos dos volumes, por exemplo `-v "C:\scr
 
 | Onde | O que tem |
 |---|---|
-| **Mapa de calor** — `log_playwright/mapa_calor.html` | Visão principal. Linhas = Login e rotinas; colunas = execuções; cor = normal / atenção / lenta / erro. Filtros, detalhes ao passar o mouse e visão em tabela. Regerado ao fim de cada execução. |
+| **Mapa de calor (serviço)** — `http://<servidor>:8010` | Visão principal, sempre atualizada pelo banco e com o **passo a passo de cada execução**. Ver [6.1](#61-serviço-do-mapa-de-calor-fastapi). |
+| Mapa de calor (arquivo) — `log_playwright/mapa_calor.html` | Mesma visão, sem servidor: Linhas = Login e rotinas; colunas = execuções; cor = normal / atenção / lenta / erro. Filtros, detalhes ao passar o mouse e visão em tabela. Regerado ao fim de cada execução. |
 | Log geral — `log_playwright/<data>_protheus_timer.log` | Toda a execução, com o **resumo dos tempos** no final. |
 | Log por item — `log_playwright/rotinas/` | Um arquivo para o login (`r00`) e um por rotina (`r01`, `r02`...). |
 | Prints — `log_playwright/*.png` | `fluxo_rNN_EE_<etapa>.png` a cada clique; `timeout_*.png` quando algo não aparece (tirado antes de qualquer Esc). |
@@ -329,6 +334,49 @@ SELECT HORARIO_EXECUCAO, ERRO, DESCRICAO
  ORDER BY HORARIO_EXECUCAO;
 ```
 
+### 6.1 Serviço do mapa de calor (FastAPI)
+
+`api_mapa.py` é um serviço web que **lê o `RPA.TIMER` no momento do acesso** — junta as execuções de todas as máquinas e não depende do robô gerar arquivo.
+
+| Endereço | O que entrega |
+|---|---|
+| `/` | A página do mapa de calor |
+| `/api/mapa?dias=60` | A grade (Login/rotinas × execuções) já classificada |
+| `/api/execucoes/{id}` | O detalhe completo de uma execução |
+| `/health` | `{"status": "ok"}` — para monitoramento |
+| `/docs` | Documentação interativa da API (Swagger) |
+
+**Clique numa célula** para abrir o painel da execução:
+
+- **tempos** do Login e de todas as rotinas daquela execução;
+- **passo a passo** da rotina escolhida — o que o robô estava fazendo e por quantos segundos (ex.: `procurando 'Visualizar'` — 22 s, com o passo mais demorado em destaque). Vem dos registros que o cronômetro grava a cada segundo, por isso mostra **onde** a lentidão aconteceu;
+- **avisos e erros** do log daquela execução (ex.: clique repetido, timeout).
+
+Na página também há o seletor **Histórico** (7 a 180 dias) e **Atualizar sozinho** (busca o banco de novo a cada minuto, sem recarregar).
+
+**Rodar no Windows:**
+
+```powershell
+pip install -r requirements-mapa.txt
+python api_mapa.py                 # http://localhost:8010
+# ou: uvicorn api_mapa:app --host 0.0.0.0 --port 8010
+```
+
+**Rodar no servidor (Docker, sempre no ar):**
+
+```bash
+docker build -f Dockerfile.mapa -t hiannyurt/protheus-timer-mapa:latest .
+docker run -d --name mapa-protheus --restart unless-stopped -p 8010:8010 \
+  -v /python_bf/playwright_timer/.env:/app/.env:ro \
+  -v /etc/localtime:/etc/localtime:ro \
+  hiannyurt/protheus-timer-mapa:latest
+```
+
+- Usa só `usernamedb`, `passworddb` e `dsn` do `.env` (somente leitura no `RPA.TIMER`). O driver roda no modo *thin* (sem Oracle Instant Client).
+- Variáveis opcionais: `MAPA_PORTA` (8010), `MAPA_HOST` (0.0.0.0), `MAPA_CACHE_SEGUNDOS` (30 — evita consultar o Oracle a cada tela aberta).
+- Banco fora do ar → a página mostra o aviso e a API responde `503` com o motivo.
+- O serviço **não tem login**: publique só na rede interna (ou atrás de um proxy com autenticação).
+
 ---
 
 ## 7. Erros e alertas
@@ -359,7 +407,9 @@ python -m unittest discover -s tests -v
 |---|---|
 | `tests/test_rotinas.py` | Leitura das rotinas (`Rotinas`, `Fluxo`, `--fluxo`) e relatório JSON |
 | `tests/test_erros_protheus.py` | Reconhecimento da mensagem de licenças |
-| `tests/test_mapa_calor.py` | Classificação normal/atenção/lenta/erro, leitura das linhas do banco e fallback |
+| `tests/test_mapa_calor.py` | Classificação normal/atenção/lenta/erro, leitura das linhas do banco, detalhe da execução e fallback |
+| `tests/test_api_mapa.py` | Rotas do serviço com o banco simulado (pulado se `fastapi`/`httpx` não estiverem instalados) |
+| `tests/linhas_exemplo.py` | Gera linhas no mesmo formato que o robô grava no `RPA.TIMER` (usado pelos testes) |
 
 Para testar uma rotina nova de ponta a ponta, rode com `--headed` e `--fluxo` (ver 4.2) e confira os prints `fluxo_*.png`.
 
@@ -375,6 +425,7 @@ Para testar uma rotina nova de ponta a ponta, rode com `--headed` e `--fluxo` (v
 | `Elemento 'X' não foi encontrado dentro de Nms` | O botão não apareceu. Veja o `timeout_X_*.png` para saber em que tela o robô estava. |
 | `Codigo de MFA ... vazio ou inválido` | E-mail não chegou em `MfaTimeout`, ou credenciais/permissão do Graph, `BOT_USER_EMAIL` ou `FOLDER_ID` errados. |
 | `(535, '5.7.3 Authentication unsuccessful')` | Senha do `sender_mail` no `.env` recusada pelo SMTP (expirada ou trocada). |
+| Página do serviço mostra `Não foi possível carregar os dados: Banco indisponível ...` | O servidor do serviço não alcança o Oracle ou o `.env` montado está errado. |
 | `Mapa de calor: banco indisponível ...; usando os JSONs locais` | Sem acesso ao Oracle naquela máquina; o mapa sai só com as execuções locais. |
 | Container parado em `Aguardando TOTVS WebAgent subir na porta 21021` | WebAgent não iniciou: confira o `.deb` em `webagent/` e refaça o build. |
 | `app (exit status 0; expected)` no Docker | Não é erro: o Python terminou normalmente e o container vai encerrar. |

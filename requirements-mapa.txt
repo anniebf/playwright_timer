@@ -1,0 +1,8 @@
+# Dependências do SERVIÇO do mapa de calor (api_mapa.py).
+# Separadas do requirements.txt do robô: a imagem do serviço não precisa de Playwright.
+fastapi==0.115.12
+uvicorn==0.34.0
+oracledb==4.0.2
+python-dotenv==1.2.3
+# só para os testes (fastapi.testclient)
+httpx==0.28.1

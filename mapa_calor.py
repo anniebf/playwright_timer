@@ -25,9 +25,12 @@ LÓGICA GERAL
        erro     -> a rotina falhou
        pulada   -> a rotina não foi executada (ex.: tela principal não recuperada)
        sem_base -> ainda não há histórico suficiente para dizer o que é normal
-5. Gera um único arquivo HTML autocontido (sem internet), com filtros, tooltip e
-   visão em tabela: log_playwright/mapa_calor.html. Ele é regenerado ao final de
-   cada execução; basta abrir/atualizar no navegador.
+5. Duas formas de ver o mapa (mesmo template mapa_calor_template.html):
+   - SERVIÇO (recomendado): api_mapa.py (FastAPI) lê o banco a cada acesso e,
+     ao clicar numa célula, mostra o detalhe completo da execução (montar_detalhe):
+     linha do tempo do que o robô fez, avisos/erros e tempo total;
+   - ARQUIVO: log_playwright/mapa_calor.html, autocontido (sem internet),
+     regenerado ao final de cada execução.
 
 Uso manual:
     python mapa_calor.py                         # banco, últimos 60 dias, grava em ./log_playwright
@@ -127,8 +130,8 @@ def linhas_para_execucoes(linhas) -> list[dict]:
     return sorted(por_id.values(), key=lambda e: (e["gerado_em"], e["id_execucao"]))
 
 
-def carregar_execucoes_banco(dias: int = 60, sistema: str = "PROTHEUS") -> list[dict]:
-    """Lê as linhas "Tempo ..." do RPA.TIMER dos últimos `dias` (mesmas credenciais do LogBanco)."""
+def _consultar(sql: str, parametros: dict) -> list[tuple]:
+    """Executa uma consulta no Oracle com as mesmas credenciais do LogBanco (.env)."""
     import oracledb  # importado aqui para os testes e o modo "arquivos" não dependerem do Oracle
     from dotenv import load_dotenv
 
@@ -137,10 +140,124 @@ def carregar_execucoes_banco(dias: int = 60, sistema: str = "PROTHEUS") -> list[
     conexao = oracledb.connect(user=os.getenv("usernamedb"), password=os.getenv("passworddb"), dsn=os.getenv("dsn"))
     try:
         with conexao.cursor() as cursor:
-            cursor.execute(SQL_TEMPOS, {"sistema": sistema, "dias": dias})
-            return linhas_para_execucoes(cursor.fetchall())
+            cursor.execute(sql, parametros)
+            return cursor.fetchall()
     finally:
         conexao.close()
+
+
+def carregar_execucoes_banco(dias: int = 60, sistema: str = "PROTHEUS") -> list[dict]:
+    """Lê as linhas "Tempo ..." do RPA.TIMER dos últimos `dias`."""
+    return linhas_para_execucoes(_consultar(SQL_TEMPOS, {"sistema": sistema, "dias": dias}))
+
+
+# ---------------------------------------------------------------------------
+# 1c) Detalhe completo de UMA execução (usado pelo serviço api_mapa.py)
+# ---------------------------------------------------------------------------
+# Todas as linhas que a execução gravou no RPA.TIMER:
+#   - a cada 1 s, o cronômetro grava o que o robô está fazendo (ERRO = 'NAO'/'SIM');
+#   - as linhas "Tempo ..." de cada item;
+#   - ao final, o LogBanco.salvar() grava cada linha do log (ERRO = 'OK'/'WARN'/'ERRO').
+SQL_EXECUCAO = """
+    SELECT DESCRICAO, ERRO, TEMPO_EXECUCAO, HORARIO_EXECUCAO
+      FROM RPA.TIMER
+     WHERE ID_EXECUCAO = :id_execucao
+       AND SISTEMA = :sistema
+     ORDER BY HORARIO_EXECUCAO
+"""
+PREFIXO_SEGUNDOS = re.compile(r"^\[(\d+)s\] - (.*)$", re.DOTALL)
+INICIO_ROTINA = re.compile(r"^Rotina (\d+)/\d+")
+
+
+def montar_detalhe(id_execucao: int, linhas) -> dict:
+    """Transforma as linhas de UMA execução em informações para o painel de detalhe.
+
+    - tempos: Login e rotinas (iguais às células do mapa);
+    - secoes: para o Login e cada rotina, a LINHA DO TEMPO do que o robô fez,
+      juntando os registros por segundo repetidos em um passo com duração
+      (ex.: "Procurando 'Visualizar'..." durante 18 s) - mostra onde o tempo foi gasto;
+    - eventos: avisos e erros do log daquela execução;
+    - final: a linha de encerramento (tempo total e situação).
+    """
+    linhas = [(str(d or ""), str(e or ""), t, h) for d, e, t, h in linhas]
+
+    # 1) Tempos de cada item, na ordem em que aconteceram
+    tempos = []
+    for descricao, _, _, horario in linhas:
+        achado = LINHA_TEMPO.match(descricao.strip())
+        if achado:
+            sucesso = achado.group("falha") is None
+            tempos.append({
+                "nome": "Login" if achado.group("login") else achado.group("rotina"),
+                "segundos": float(achado.group("segundos")),
+                "sucesso": sucesso,
+                "erro": "" if sucesso else (achado.group("erro") or "erro"),
+                "hora": horario.strftime("%H:%M:%S"),
+            })
+    nomes_rotinas = [t["nome"] for t in tempos if t["nome"] != "Login"]
+
+    # 2) Linha do tempo (registros por segundo), separada por seção
+    secoes: list[dict] = []
+    eventos: list[dict] = []
+    final = None
+    secao_atual = None
+    passo_atual = None  # passo aberto: mesmo texto em segundos seguidos
+    for descricao, status, tempo, horario in linhas:
+        achado = PREFIXO_SEGUNDOS.match(descricao.strip())
+        if not achado or LINHA_TEMPO.match(descricao.strip()):
+            continue
+        texto = " ".join(achado.group(2).split())
+
+        if tempo and int(tempo) > 1:
+            # Só a linha de encerramento grava o tempo total (as demais gravam 0 ou 1)
+            final = {"texto": texto, "total_segundos": int(tempo), "hora": horario.strftime("%H:%M:%S")}
+            continue
+        if status in ("WARN", "ERRO"):
+            # Aviso/erro do log (ou do cronômetro já marcado com erro): lista de eventos, sem repetir
+            if not eventos or eventos[-1]["texto"] != texto:
+                eventos.append({"hora": horario.strftime("%H:%M:%S"), "nivel": status, "texto": texto[:400]})
+            continue
+        if status not in ("NAO", "SIM") or tempo == 0:
+            continue  # linhas OK do log e a linha de início: o detalhe usa os registros por segundo
+
+        # Muda de seção quando o robô começa uma rotina ("Rotina 2/3 ...")
+        rotina = INICIO_ROTINA.match(texto)
+        nome_secao = ("Login" if secao_atual is None else secao_atual["nome"])
+        if rotina:
+            indice = int(rotina.group(1))
+            nome_secao = nomes_rotinas[indice - 1] if indice <= len(nomes_rotinas) else f"Rotina {indice}"
+        if secao_atual is None or secao_atual["nome"] != nome_secao:
+            secao_atual = {"nome": nome_secao, "passos": []}
+            secoes.append(secao_atual)
+            passo_atual = None
+
+        if passo_atual and passo_atual["acao"] == texto:
+            passo_atual["fim"] = horario
+        else:
+            passo_atual = {"acao": texto[:300], "inicio": horario, "fim": horario}
+            secao_atual["passos"].append(passo_atual)
+
+    # 3) Duração de cada passo = até o início do passo seguinte (registros a cada ~1 s)
+    todos = [p for s in secoes for p in s["passos"]]
+    for atual, seguinte in zip(todos, todos[1:] + [None]):
+        fim = seguinte["inicio"] if seguinte else atual["fim"]
+        atual["duracao_s"] = max(1, int(round((fim - atual["inicio"]).total_seconds())))
+        atual["hora"] = atual.pop("inicio").strftime("%H:%M:%S")
+        atual.pop("fim")
+
+    return {
+        "id_execucao": id_execucao,
+        "inicio": linhas[0][3].strftime("%Y-%m-%d %H:%M:%S") if linhas else None,
+        "tempos": tempos,
+        "secoes": secoes,
+        "eventos": eventos[-50:],
+        "final": final,
+    }
+
+
+def carregar_detalhe_execucao(id_execucao: int, sistema: str = "PROTHEUS") -> dict:
+    """Busca no RPA.TIMER todas as linhas da execução e monta o detalhe."""
+    return montar_detalhe(id_execucao, _consultar(SQL_EXECUCAO, {"id_execucao": id_execucao, "sistema": sistema}))
 
 
 # ---------------------------------------------------------------------------
