@@ -17,7 +17,7 @@ docker login  # Primeiro fazer login no docker
 docker build --no-cache -t hiannyurt/playwright-webagent:versaoatual .  # Docker build para criar uma nova versao da imagem
 docker pull hiannyurt/playwright-webagent:latest  #docker pull para subir a nova versao da imagem
 
-#para o rodar 
+#para o rodar na producao atualize o latest
 #para fazer no servidor ou para usar a imagem ja existente no docker hub em outra maquina
 docker login
 docker push hiannyurt/playwright-webagent:latest
