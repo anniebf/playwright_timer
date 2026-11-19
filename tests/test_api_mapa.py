@@ -42,8 +42,10 @@ class TestApiMapa(unittest.TestCase):
                 return resumo_como_no_oracle(self.execucoes)
             if sql is mapa_calor.SQL_TEMPOS:
                 return tempos_como_no_oracle(self.execucoes)
-            return next((ls for (id_, dia), ls in self.execucoes.items()
-                         if id_ == p["id_execucao"] and (p["dia"] is None or dia == p["dia"])), [])
+            # SQL_EXECUCAO: todas as linhas do ID dentro da janela (pode trazer outra execução
+            # com o mesmo número - quem separa é o mapa_calor.recortar_sessao)
+            return [l for (id_, _), ls in self.execucoes.items() if id_ == p["id_execucao"]
+                    for l in ls if p["de"] <= l[3] <= p["ate"]]
 
         self._original = mapa_calor._consultar
         mapa_calor._consultar = consultar
@@ -67,12 +69,12 @@ class TestApiMapa(unittest.TestCase):
         self.assertIn("banco RPA.TIMER", dados["fonte"])
 
     def test_detalhe_e_404(self):
-        d = self.cliente.get("/api/execucoes/104?dia=2026-11-19").json()
+        d = self.cliente.get("/api/execucoes/104?inicio=2026-11-19T12:00:00").json()
         self.assertEqual(d["id_execucao"], 104)
-        antiga = self.cliente.get("/api/execucoes/90?dia=2026-11-10").json()
+        antiga = self.cliente.get("/api/execucoes/90?inicio=2026-11-10T08:30:00").json()
         self.assertEqual([s["nome"] for s in antiga["secoes"]], ["Login", "Pedidos de Compra"])
-        self.assertEqual(self.cliente.get("/api/execucoes/104?dia=19-11-2026").status_code, 422)
-        self.assertEqual(self.cliente.get("/api/execucoes/999").status_code, 404)
+        self.assertEqual(self.cliente.get("/api/execucoes/104?inicio=ontem").status_code, 422)
+        self.assertEqual(self.cliente.get("/api/execucoes/999?inicio=2026-11-19T08:00:00").status_code, 404)
 
     def test_banco_fora_do_ar_vira_503(self):
         mapa_calor._consultar = lambda sql, p: (_ for _ in ()).throw(RuntimeError("ORA-12541: TNS:no listener\nmais detalhes"))

@@ -200,6 +200,52 @@ class TestHistoricoDoBanco(unittest.TestCase):
         self.assertEqual(f(None, []), "Rotina (registro antigo)")
 
 
+class TestMesmoIdEmExecucoesDiferentes(unittest.TestCase):
+    """Bug real: um passo de setembro 'durou' 4.778.933 s (55 dias) porque o detalhe juntou
+    duas execuções com o mesmo ID_EXECUCAO (contadores do servidor e do PC se cruzam)."""
+
+    def setUp(self):
+        from datetime import datetime as dt
+        from linhas_exemplo import execucao_playwright_antiga, execucao_padrao
+        self.dt = dt
+        self.setembro = execucao_playwright_antiga(dt(2026, 9, 25, 2, 0, 0), 40, 25)
+        self.hoje = execucao_padrao(dt(2026, 11, 19, 9, 30, 0))
+        self.hoje_tarde = execucao_padrao(dt(2026, 11, 19, 12, 30, 0))   # mesmo ID, mesmo dia, 3 h depois
+
+    def test_detalhe_pega_so_a_sessao_do_inicio(self):
+        linhas = self.setembro + self.hoje + self.hoje_tarde
+        sessao = mapa_calor.recortar_sessao(linhas, self.dt(2026, 11, 19, 9, 30, 0))
+        self.assertEqual(sessao, sorted(self.hoje, key=lambda l: l[3]))
+        detalhe = mapa_calor.montar_detalhe(2455, sessao)
+        maior = max(p["duracao_s"] for s in detalhe["secoes"] for p in s["passos"])
+        self.assertLess(maior, 60)
+
+    def test_duracao_nao_atravessa_buraco_nos_dados(self):
+        # mesmo sem recorte, nenhum passo pode durar o intervalo entre execuções
+        detalhe = mapa_calor.montar_detalhe(2455, self.setembro + self.hoje)
+        maior = max(p["duracao_s"] for s in detalhe["secoes"] for p in s["passos"])
+        self.assertLess(maior, 60)
+
+    def test_resumo_separa_execucoes_do_mesmo_dia(self):
+        from linhas_exemplo import resumo_como_no_oracle, tempos_como_no_oracle
+        execucoes = {(2455, "manha"): self.hoje, (2455, "tarde"): self.hoje_tarde}
+        execs = mapa_calor.montar_execucoes_banco(resumo_como_no_oracle(execucoes), tempos_como_no_oracle(execucoes))
+        self.assertEqual([e["gerado_em"][11:16] for e in execs], ["09:30", "12:30"])
+        self.assertTrue(all(len(e["rotinas"]) == 4 for e in execs))   # total + login + 2 rotinas, sem duplicar
+
+    def test_linha_de_log_no_meio_do_passo_e_juntada(self):
+        from datetime import timedelta
+        ini = self.dt(2026, 11, 19, 10, 0, 0)
+        linhas = [(f"[{s:04d}s] - Rotina 1/1 - Etapa 4/6: procurando 'Visualizar'", "NAO", 1, ini + timedelta(seconds=s))
+                  for s in range(10)]
+        linhas.insert(5, ("[0005s] - Aguardando elemento ou seletor: 'Visualizar'...", "NAO", 1, ini + timedelta(seconds=5)))
+        linhas.append(("[0012s] - Tempo Rotina 'Pedidos de Compra': 12.0s", "NAO", 12, ini + timedelta(seconds=12)))
+        passos = mapa_calor.montar_detalhe(1, linhas)["secoes"][0]["passos"]
+        visualizar = [p for p in passos if "procurando 'Visualizar'" in p["acao"]]
+        self.assertEqual(len(visualizar), 1)
+        self.assertEqual(visualizar[0]["duracao_s"], 10)
+
+
 class TestArquivos(unittest.TestCase):
     def test_gera_html_e_ignora_json_invalido(self):
         with tempfile.TemporaryDirectory() as pasta:

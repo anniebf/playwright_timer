@@ -15,8 +15,10 @@ LÓGICA GERAL
    anteriores (robô TIR e Playwright antigo) o mapa usa um resumo agregado no
    próprio Oracle (SQL_RESUMO_EXECUCOES): tempo total de cada execução e, no
    Playwright antigo, Login/rotina ESTIMADOS pelo registro "Acessando menu lateral"
-   (ver montar_execucoes_banco). Execuções são identificadas por ID + DIA, porque
-   o servidor e o PC de teste têm contadores de ID separados (podem repetir).
+   (ver montar_execucoes_banco). Execuções são identificadas por ID + SESSÃO: o
+   servidor e o PC de teste têm contadores de ID separados e o mesmo número pode
+   aparecer em execuções diferentes; mais de INTERVALO_NOVA_EXECUCAO_MIN minutos sem
+   registros com o mesmo ID = outra execução.
 2. Este módulo transforma essas linhas em uma grade:
        linhas  = Execução completa (tempo total) + Login + rotinas
        colunas = execuções (mais antiga -> mais recente)
@@ -51,7 +53,7 @@ import logging
 import os
 import re
 import statistics
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 logger = logging.getLogger("mapa_calor")
@@ -113,20 +115,29 @@ def linhas_para_execucoes(linhas) -> list[dict]:
     """Converte linhas (ID_EXECUCAO, DESCRICAO, HORARIO_EXECUCAO) no mesmo formato dos JSONs.
 
     Linhas que não são do formato "Tempo ..." são ignoradas (ex.: logs parecidos).
-    A execução é identificada por ID + DIA (IDs podem se repetir entre máquinas);
-    a data dela é o horário da primeira linha de tempo.
+    A execução é identificada por ID + SESSÃO (IDs podem se repetir entre máquinas):
+    linhas do mesmo ID separadas por mais de INTERVALO_NOVA_EXECUCAO_MIN = outra execução.
+    A data dela é o horário da primeira linha de tempo.
     """
-    por_id: dict = {}
-    for id_execucao, descricao, horario in linhas:
+    execucoes: list[dict] = []
+    ultima_por_id: dict = {}  # id -> (execução aberta, horário da última linha)
+    for id_execucao, descricao, horario in sorted(linhas, key=lambda l: (l[2], str(l[0]))):
         achado = LINHA_TEMPO.match(str(descricao or "").strip())
         if not achado:
             continue
-        execucao = por_id.setdefault((id_execucao, horario.date()), {
-            "id_execucao": id_execucao,
-            "dia": horario.strftime("%Y-%m-%d"),
-            "gerado_em": horario.strftime("%Y-%m-%d %H:%M:%S"),
-            "rotinas": [],
-        })
+        aberta = ultima_por_id.get(id_execucao)
+        if aberta and (horario - aberta[1]).total_seconds() <= INTERVALO_NOVA_EXECUCAO_MIN * 60:
+            execucao = aberta[0]
+        else:
+            execucao = {
+                "id_execucao": id_execucao,
+                "dia": horario.strftime("%Y-%m-%d"),
+                "gerado_em": horario.strftime("%Y-%m-%d %H:%M:%S"),
+                "_primeira": horario,
+                "rotinas": [],
+            }
+            execucoes.append(execucao)
+        ultima_por_id[id_execucao] = (execucao, horario)
         sucesso = achado.group("falha") is None
         execucao["rotinas"].append({
             "nome": "Login" if achado.group("login") else achado.group("rotina"),
@@ -135,13 +146,16 @@ def linhas_para_execucoes(linhas) -> list[dict]:
             "sucesso": sucesso,
             "erro": "" if sucesso else (achado.group("erro") or "erro"),
         })
-    return sorted(por_id.values(), key=lambda e: (e["gerado_em"], e["id_execucao"]))
+    # "_primeira" (datetime) fica para montar_execucoes_banco casar com o resumo; ele remove depois.
+    return sorted(execucoes, key=lambda e: (e["gerado_em"], str(e["id_execucao"])))
 
 
 # ---------------------------------------------------------------------------
 # 1a) Histórico completo: uma linha por execução, agregada no Oracle
 # ---------------------------------------------------------------------------
 NOME_TOTAL = "Execução completa"
+# Mais que isso sem registros com o mesmo ID_EXECUCAO = começou outra execução
+INTERVALO_NOVA_EXECUCAO_MIN = 30
 
 # Para cada execução (ID + dia) o Oracle devolve só o essencial, em vez de trazer
 # os milhares de registros por segundo:
@@ -152,7 +166,25 @@ NOME_TOTAL = "Execução completa"
 #   INICIO_MENU     Playwright antigo: quando começou a navegação no menu (= fim do login)
 #   CAMINHO         texto com o caminho da rotina antiga (para dar nome à linha)
 # DESCRICAO pode ser CLOB: TO_CHAR(SUBSTR(...)) permite MAX/KEEP sem erro de tipo.
-SQL_RESUMO_EXECUCOES = """
+# Sessões: LAG compara cada linha com a anterior do mesmo ID; um intervalo maior que
+# INTERVALO_NOVA_EXECUCAO_MIN abre uma nova sessão (CAST AS DATE funciona com DATE e TIMESTAMP).
+SQL_RESUMO_EXECUCOES = f"""
+    WITH marcadas AS (
+        SELECT ID_EXECUCAO, DESCRICAO, ERRO, TEMPO_EXECUCAO, HORARIO_EXECUCAO,
+               CASE WHEN (CAST(HORARIO_EXECUCAO AS DATE)
+                          - CAST(LAG(HORARIO_EXECUCAO) OVER (PARTITION BY ID_EXECUCAO ORDER BY HORARIO_EXECUCAO) AS DATE))
+                         * 1440 > {INTERVALO_NOVA_EXECUCAO_MIN}
+                    THEN 1 ELSE 0 END AS NOVA_SESSAO
+          FROM RPA.TIMER
+         WHERE SISTEMA = :sistema
+           AND HORARIO_EXECUCAO >= SYSDATE - :dias
+    ),
+    sessoes AS (
+        SELECT m.*,
+               SUM(NOVA_SESSAO) OVER (PARTITION BY ID_EXECUCAO ORDER BY HORARIO_EXECUCAO
+                                      ROWS UNBOUNDED PRECEDING) AS SESSAO
+          FROM marcadas m
+    )
     SELECT ID_EXECUCAO,
            MIN(HORARIO_EXECUCAO) AS INICIO,
            MAX(TEMPO_EXECUCAO) AS TOTAL,
@@ -168,10 +200,8 @@ SQL_RESUMO_EXECUCOES = """
            MAX(CASE WHEN DESCRICAO LIKE '%Acessando menu lateral:%'
                       OR DESCRICAO LIKE '%Executando fluxo configurado:%'
                     THEN TO_CHAR(SUBSTR(DESCRICAO, 1, 300)) END) AS CAMINHO
-      FROM RPA.TIMER
-     WHERE SISTEMA = :sistema
-       AND HORARIO_EXECUCAO >= SYSDATE - :dias
-     GROUP BY ID_EXECUCAO, TRUNC(HORARIO_EXECUCAO)
+      FROM sessoes
+     GROUP BY ID_EXECUCAO, SESSAO
     HAVING MAX(TEMPO_EXECUCAO) > 0
 """
 PREFIXO_REGISTRO = re.compile(r"^\[(?:\d+s|[A-Z]+)\]\s*-?\s*")   # "[0042s] - " ou "[OK] "
@@ -212,8 +242,20 @@ def montar_execucoes_banco(resumos, linhas_tempo) -> list[dict]:
     - Playwright antigo: Login e rotina ESTIMADOS (estimado=True) pelo início do menu;
     - TIR: só o tempo total.
     """
-    atuais = {(e["id_execucao"], e["dia"]): e for e in linhas_para_execucoes(linhas_tempo)}
-    nomes_conhecidos = [r["nome"] for e in atuais.values() for r in e["rotinas"] if r["nome"] != "Login"]
+    atuais: dict = {}  # id -> execuções atuais (tempos exatos) ainda não casadas com o resumo
+    for e in linhas_para_execucoes(linhas_tempo):
+        atuais.setdefault(e["id_execucao"], []).append(e)
+    nomes_conhecidos = [r["nome"] for lista in atuais.values() for e in lista
+                        for r in e["rotinas"] if r["nome"] != "Login"]
+
+    def casar_atual(id_execucao, inicio, total):
+        """A execução atual do mesmo ID cujas linhas "Tempo" caem dentro desta sessão."""
+        limite = inicio + timedelta(seconds=total + INTERVALO_NOVA_EXECUCAO_MIN * 60)
+        for e in atuais.get(id_execucao, []):
+            if inicio <= e["_primeira"] <= limite:
+                atuais[id_execucao].remove(e)
+                return e
+        return None
 
     execucoes = []
     for (id_execucao, inicio, total, status_final, descricao_final,
@@ -222,7 +264,7 @@ def montar_execucoes_banco(resumos, linhas_tempo) -> list[dict]:
         total = float(total or 0)
         sucesso_total = str(status_final or "").upper() in ("NAO", "OK")
         erro_total = "" if sucesso_total else (_limpar_descricao(descricao_final) or "erro")
-        atual = atuais.pop((id_execucao, dia), None)  # mesma chave: ID + dia (texto AAAA-MM-DD)
+        atual = casar_atual(id_execucao, inicio, total)
 
         if atual:
             origem, itens = "atual", list(atual["rotinas"])
@@ -248,7 +290,9 @@ def montar_execucoes_banco(resumos, linhas_tempo) -> list[dict]:
         })
 
     # Execuções com tempos atuais mas fora do resumo (não deveria ocorrer): mantém mesmo assim.
-    execucoes.extend(dict(e, origem="atual") for e in atuais.values())
+    execucoes.extend(dict(e, origem="atual") for lista in atuais.values() for e in lista)
+    for e in execucoes:
+        e.pop("_primeira", None)
     return sorted(execucoes, key=lambda e: (e["gerado_em"], str(e["id_execucao"])))
 
 
@@ -287,7 +331,7 @@ SQL_EXECUCAO = """
       FROM RPA.TIMER
      WHERE ID_EXECUCAO = :id_execucao
        AND SISTEMA = :sistema
-       AND (:dia IS NULL OR TRUNC(HORARIO_EXECUCAO) = TO_DATE(:dia, 'YYYY-MM-DD'))
+       AND HORARIO_EXECUCAO BETWEEN :de AND :ate
      ORDER BY HORARIO_EXECUCAO
 """
 PREFIXO_SEGUNDOS = re.compile(r"^\[(\d+)s\] - (.*)$", re.DOTALL)
@@ -360,19 +404,26 @@ def montar_detalhe(id_execucao: int, linhas) -> dict:
             secoes.append(secao_atual)
             passo_atual = None
 
-        if passo_atual and passo_atual["acao"] == texto:
+        passos = secao_atual["passos"]
+        if passo_atual and passo_atual["acao"] == texto[:300]:
+            passo_atual["fim"] = horario
+        elif (len(passos) >= 2 and passos[-2]["acao"] == texto[:300] and passos[-1]["registros"] == 1
+              and (horario - passos[-2]["fim"]).total_seconds() <= 3):
+            # Uma linha de log caiu no meio de um passo que continua: junta os dois pedaços
+            passo_atual = passos[-2]
             passo_atual["fim"] = horario
         else:
-            passo_atual = {"acao": texto[:300], "inicio": horario, "fim": horario}
-            secao_atual["passos"].append(passo_atual)
+            passo_atual = {"acao": texto[:300], "inicio": horario, "fim": horario, "registros": 0}
+            passos.append(passo_atual)
+        passo_atual["registros"] += 1
 
-    # 3) Duração de cada passo = até o início do passo seguinte (registros a cada ~1 s)
-    todos = [p for s in secoes for p in s["passos"]]
-    for atual, seguinte in zip(todos, todos[1:] + [None]):
-        fim = seguinte["inicio"] if seguinte else atual["fim"]
-        atual["duracao_s"] = max(1, int(round((fim - atual["inicio"]).total_seconds())))
-        atual["hora"] = atual.pop("inicio").strftime("%H:%M:%S")
-        atual.pop("fim")
+    # 3) Duração de cada passo = do seu primeiro ao seu último registro (+1 s, um registro por
+    #    segundo). Nunca até o passo seguinte: um buraco nos dados não vira duração.
+    for passo in (p for s in secoes for p in s["passos"]):
+        passo["duracao_s"] = max(1, int(round((passo["fim"] - passo["inicio"]).total_seconds())) + 1)
+        passo["hora"] = passo.pop("inicio").strftime("%H:%M:%S")
+        passo.pop("fim")
+        passo.pop("registros")
 
     return {
         "id_execucao": id_execucao,
@@ -384,10 +435,32 @@ def montar_detalhe(id_execucao: int, linhas) -> dict:
     }
 
 
-def carregar_detalhe_execucao(id_execucao: int, dia: str | None = None, sistema: str = "PROTHEUS") -> dict:
-    """Busca no RPA.TIMER todas as linhas da execução (ID + dia) e monta o detalhe."""
-    linhas = _consultar(SQL_EXECUCAO, {"id_execucao": id_execucao, "sistema": sistema, "dia": dia})
-    return montar_detalhe(id_execucao, linhas)
+def recortar_sessao(linhas, inicio: datetime) -> list:
+    """Das linhas do ID, fica só com a sessão (execução) que contém o `inicio`.
+
+    Linhas do mesmo ID separadas por mais de INTERVALO_NOVA_EXECUCAO_MIN são de outra
+    execução (ex.: o servidor e o PC usaram o mesmo número em dias diferentes).
+    """
+    sessoes: list[list] = []
+    for linha in sorted(linhas, key=lambda l: l[3]):
+        if not sessoes or (linha[3] - sessoes[-1][-1][3]).total_seconds() > INTERVALO_NOVA_EXECUCAO_MIN * 60:
+            sessoes.append([])
+        sessoes[-1].append(linha)
+    if not sessoes:
+        return []
+    # a sessão que contém o início; senão, a que começa mais perto dele
+    return min(sessoes, key=lambda s: 0 if s[0][3] <= inicio <= s[-1][3]
+               else abs((s[0][3] - inicio).total_seconds()))
+
+
+def carregar_detalhe_execucao(id_execucao: int, inicio: datetime, sistema: str = "PROTHEUS") -> dict:
+    """Busca no RPA.TIMER as linhas da execução que começou em `inicio` e monta o detalhe."""
+    janela = timedelta(minutes=INTERVALO_NOVA_EXECUCAO_MIN)
+    linhas = _consultar(SQL_EXECUCAO, {
+        "id_execucao": id_execucao, "sistema": sistema,
+        "de": inicio - janela, "ate": inicio + timedelta(hours=6),
+    })
+    return montar_detalhe(id_execucao, recortar_sessao(linhas, inicio))
 
 
 # ---------------------------------------------------------------------------

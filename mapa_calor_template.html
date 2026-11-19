@@ -458,7 +458,7 @@ async function abrirDetalhe(rotina, i) {
   painel.innerHTML = `<p class="nota">Carregando a execução ${esc(col.id)}...</p>`;
   painel.scrollIntoView({ behavior: "smooth", block: "nearest" });
   try {
-    detalheAtual = await buscarJson(`api/execucoes/${encodeURIComponent(col.id)}?dia=${encodeURIComponent(col.dia)}`);
+    detalheAtual = await buscarJson(`api/execucoes/${encodeURIComponent(col.id)}?inicio=${encodeURIComponent(col.data.replace(" ", "T"))}`);
     detalheAtual.coluna = i;  // as células do mapa dão os tempos (inclusive estimados e o total)
     desenharDetalhe(rotina);
   } catch (e) {

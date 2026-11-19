@@ -348,14 +348,15 @@ SELECT HORARIO_EXECUCAO, ERRO, DESCRICAO
 
 - A linha **Execução completa** é o tempo total de cada execução e existe em todas as versões — é a série histórica mais longa.
 - Valores com **`~`** são estimados: na versão antiga, a "rotina" inclui também o fechamento da tela. Rotinas antigas caem na mesma linha da rotina atual de mesmo nome (ex.: `Pedidos de Compra`).
-- Cada execução é identificada por **ID + dia**: o servidor e o PC de teste têm contadores de `ID_EXECUCAO` separados e podem repetir números.
+- Cada execução é identificada por **ID + sessão**: o servidor e o PC de teste têm contadores de `ID_EXECUCAO` separados e o mesmo número aparece em execuções diferentes. Mais de 30 minutos sem registros com o mesmo ID = outra execução (`INTERVALO_NOVA_EXECUCAO_MIN` em `mapa_calor.py`).
+- No passo a passo, a duração de cada passo vai do seu primeiro ao último registro por segundo (um buraco nos dados nunca vira duração).
 - O histórico é resumido **dentro do Oracle** (uma linha por execução), então períodos longos (até 2 anos) não trazem milhares de registros para o serviço.
 
 | Endereço | O que entrega |
 |---|---|
 | `/` | A página do mapa de calor |
 | `/api/mapa?dias=60` | A grade (Login/rotinas × execuções) já classificada |
-| `/api/execucoes/{id}?dia=AAAA-MM-DD` | O detalhe completo de uma execução |
+| `/api/execucoes/{id}?inicio=AAAA-MM-DDTHH:MM:SS` | O detalhe completo da execução que começou nesse horário |
 | `/health` | `{"status": "ok"}` — para monitoramento |
 | `/docs` | Documentação interativa da API (Swagger) |
 
