@@ -1,0 +1,378 @@
+<!doctype html>
+<!--
+  mapa_calor_template.html - Template do mapa de calor dos tempos das rotinas.
+
+  LÓGICA GERAL
+  - O Python (mapa_calor.py) substitui o marcador de dados no <script> abaixo
+    pelo JSON já calculado: colunas (execuções), rotinas e células com status.
+  - Este arquivo só DESENHA: aplica os filtros, monta a grade, o tooltip, os
+    cartões de resumo e a visão em tabela. Nenhum cálculo de "normal" é feito aqui.
+  - Autocontido: sem bibliotecas externas, abre offline.
+-->
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mapa de calor - Rotinas Protheus</title>
+<style>
+  /* ---------- Tokens de cor (claro / escuro) ---------- */
+  :root {
+    --bg: #f7f7f5; --surface: #ffffff; --surface-2: #efeee9;
+    --ink: #0b0b0b; --ink-2: #4a4a46; --ink-3: #75746e;
+    --hair: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
+    --normal-bg: #dff1df; --normal-ink: #0b0b0b; --normal-icon: #0a7a0a;
+    --atencao-bg: #fab219; --atencao-ink: #0b0b0b;
+    --lenta-bg: #ec835a;  --lenta-ink: #0b0b0b;
+    --erro-bg: #d03b3b;   --erro-ink: #ffffff;
+    --pulada-bg: #e9e8e2; --pulada-ink: #75746e;
+    --sembase-bg: #f1f0eb; --sembase-ink: #4a4a46;
+    --focus: #2a6fdb;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #121211; --surface: #1a1a19; --surface-2: #232321;
+      --ink: #f2f1ec; --ink-2: #c3c2b7; --ink-3: #9a998f;
+      --hair: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+      --normal-bg: #173a17; --normal-ink: #f2f1ec; --normal-icon: #4cc94c;
+      --pulada-bg: #262624; --pulada-ink: #9a998f;
+      --sembase-bg: #20201e; --sembase-ink: #c3c2b7;
+      --focus: #6ea3ff;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #121211; --surface: #1a1a19; --surface-2: #232321;
+    --ink: #f2f1ec; --ink-2: #c3c2b7; --ink-3: #9a998f;
+    --hair: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+    --normal-bg: #173a17; --normal-ink: #f2f1ec; --normal-icon: #4cc94c;
+    --pulada-bg: #262624; --pulada-ink: #9a998f;
+    --sembase-bg: #20201e; --sembase-ink: #c3c2b7;
+    --focus: #6ea3ff;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.45 "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+  }
+  .page { max-width: 1400px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; font-weight: 650; }
+  .sub { color: var(--ink-3); margin: 0 0 20px; }
+
+  /* ---------- Cartões de resumo da última execução ---------- */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .tile { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 14px 16px; }
+  .tile .lbl { color: var(--ink-3); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .tile .val { font-size: 26px; font-weight: 650; margin-top: 2px; display: flex; align-items: center; gap: 8px; }
+  .tile .det { color: var(--ink-2); font-size: 12px; margin-top: 2px; }
+  .badge { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; height: 26px; padding: 0 6px;
+           border-radius: 6px; font-size: 14px; font-weight: 700; }
+
+  /* ---------- Filtros (uma linha acima do gráfico) ---------- */
+  .filters { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 12px;
+             background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 10px 14px; }
+  .filters label { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); }
+  select, input[type=search] { font: inherit; color: var(--ink); background: var(--surface-2);
+           border: 1px solid var(--hair); border-radius: 6px; padding: 5px 8px; }
+  input[type=search] { min-width: 180px; }
+  .seg { display: inline-flex; border: 1px solid var(--hair); border-radius: 6px; overflow: hidden; }
+  .seg button { font: inherit; border: 0; background: var(--surface-2); color: var(--ink-2); padding: 5px 12px; cursor: pointer; }
+  .seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+  .spacer { flex: 1; }
+
+  /* ---------- Legenda ---------- */
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0 0 12px; color: var(--ink-2); font-size: 13px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .chip { width: 22px; height: 18px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center;
+          font-size: 11px; font-weight: 700; }
+
+  /* ---------- Grade do mapa de calor ---------- */
+  .card { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 8px; }
+  .scroll { overflow-x: auto; }
+  table.heat { border-collapse: separate; border-spacing: 2px; }   /* 2px de espaço entre células */
+  .heat th, .heat td { padding: 0; }
+  .heat thead th { font-weight: 500; font-size: 11px; color: var(--ink-3); text-align: center; padding: 2px 2px 6px;
+                   white-space: nowrap; line-height: 1.25; }
+  .heat thead th.ultima { color: var(--ink); font-weight: 700; }
+  .heat th.nome { position: sticky; left: 0; z-index: 2; background: var(--surface); text-align: left;
+                  padding: 0 12px 0 6px; min-width: 190px; max-width: 260px;
+                  box-shadow: 6px 0 6px -6px rgba(0,0,0,.25); }  /* sombra: a grade rola por baixo */
+  .heat th.nome .n { display: block; font-size: 13px; font-weight: 600; color: var(--ink); white-space: nowrap;
+                     overflow: hidden; text-overflow: ellipsis; }
+  .heat th.nome .m { display: block; font-size: 11px; color: var(--ink-3); font-weight: 400; }
+  .heat th.nome.login .n { color: var(--ink-2); }
+  .cell { width: 64px; height: 40px; border: 0; border-radius: 4px; font: inherit; font-size: 12px; font-weight: 600;
+          cursor: default; display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1.1;
+          font-variant-numeric: tabular-nums; }
+  .cell .ic { font-size: 10px; }
+  .cell:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+  .cell:hover { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--ink-3); }
+  .st-normal   { background: var(--normal-bg);  color: var(--normal-ink); }
+  .st-normal .ic { color: var(--normal-icon); }
+  .st-atencao  { background: var(--atencao-bg); color: var(--atencao-ink); }
+  .st-lenta    { background: var(--lenta-bg);   color: var(--lenta-ink); }
+  .st-erro     { background: var(--erro-bg);    color: var(--erro-ink); }
+  .st-pulada   { color: var(--pulada-ink);
+                 background: repeating-linear-gradient(135deg, var(--pulada-bg) 0 5px, transparent 5px 9px), var(--surface-2); }
+  .st-sem_base { background: var(--sembase-bg); color: var(--sembase-ink); font-weight: 500; }
+  .st-vazio    { background: transparent; border: 1px dashed var(--hair); color: var(--ink-3); }
+
+  /* ---------- Tooltip ---------- */
+  .tip { position: fixed; z-index: 10; pointer-events: none; max-width: 320px; background: var(--surface);
+         color: var(--ink); border: 1px solid var(--ring); border-radius: 8px; padding: 10px 12px; font-size: 13px;
+         box-shadow: 0 6px 24px rgba(0,0,0,.18); display: none; }
+  .tip .t { font-weight: 650; margin-bottom: 4px; }
+  .tip .r { display: flex; justify-content: space-between; gap: 16px; color: var(--ink-2); }
+  .tip .r b { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .tip .e { margin-top: 6px; color: var(--ink-2); font-size: 12px; border-top: 1px solid var(--hair); padding-top: 6px; }
+
+  /* ---------- Visão em tabela ---------- */
+  table.lista { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .lista th, .lista td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--hair); }
+  .lista th { color: var(--ink-3); font-weight: 600; font-size: 12px; }
+  .lista td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .vazio-msg { padding: 32px; text-align: center; color: var(--ink-3); }
+  .nota { color: var(--ink-3); font-size: 12px; margin-top: 10px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Mapa de calor - tempo das rotinas Protheus</h1>
+  <p class="sub" id="sub"></p>
+
+  <section class="tiles" id="tiles" aria-label="Resumo da última execução"></section>
+
+  <div class="filters" role="group" aria-label="Filtros">
+    <label>Período
+      <select id="f-periodo">
+        <option value="10">Últimas 10 execuções</option>
+        <option value="30" selected>Últimas 30 execuções</option>
+        <option value="90">Últimas 90 execuções</option>
+        <option value="0">Todas</option>
+      </select>
+    </label>
+    <label>Rotina <input type="search" id="f-busca" placeholder="Filtrar pelo nome"></label>
+    <label><input type="checkbox" id="f-problemas"> Só rotinas com problema</label>
+    <label>Mostrar
+      <span class="seg" role="group" aria-label="Valor nas células">
+        <button type="button" data-valor="s" aria-pressed="true">Segundos</button>
+        <button type="button" data-valor="var" aria-pressed="false">% vs normal</button>
+      </span>
+    </label>
+    <span class="spacer"></span>
+    <span class="seg" role="group" aria-label="Visualização">
+      <button type="button" data-visao="mapa" aria-pressed="true">Mapa</button>
+      <button type="button" data-visao="tabela" aria-pressed="false">Tabela</button>
+    </span>
+    <label title="Recarrega a página a cada 5 minutos para pegar execuções novas">
+      <input type="checkbox" id="f-auto"> Atualizar sozinho
+    </label>
+  </div>
+
+  <div class="legend" id="legenda"></div>
+
+  <div class="card">
+    <div class="scroll" id="mapa"></div>
+    <div id="tabela" hidden></div>
+  </div>
+  <p class="nota" id="nota"></p>
+</div>
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script>
+/* Dados injetados pelo mapa_calor.py (não editar à mão). */
+const DADOS = /*__DADOS__*/null;
+
+/* ---------- Definição dos status: cor + ícone + texto (nunca só cor) ---------- */
+const STATUS = {
+  normal:   { ic: "✓",  nome: "Normal" },
+  atencao:  { ic: "▲",  nome: "Atenção" },
+  lenta:    { ic: "▲▲", nome: "Lenta" },
+  erro:     { ic: "✕",  nome: "Erro" },
+  pulada:   { ic: "–",  nome: "Não executada" },
+  sem_base: { ic: "·",  nome: "Sem histórico" },
+};
+const PROBLEMA = new Set(["atencao", "lenta", "erro", "pulada"]);
+
+/* ---------- Estado da tela (filtros) - lembrado entre aberturas, se possível ---------- */
+const estado = { periodo: 30, busca: "", problemas: false, valor: "s", visao: "mapa", auto: false };
+try { Object.assign(estado, JSON.parse(localStorage.getItem("mapaCalorFiltros") || "{}")); } catch (e) {}
+const salvarEstado = () => { try { localStorage.setItem("mapaCalorFiltros", JSON.stringify(estado)); } catch (e) {} };
+
+/* ---------- Utilitários de formatação ---------- */
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmtS = s => s == null ? "-" : (s >= 100 ? Math.round(s) : s.toFixed(1)).toString().replace(".", ",") + "s";
+const fmtVar = v => v == null ? "-" : (v > 0 ? "+" : "") + v + "%";
+const fmtData = d => { const [a, h] = d.split(" "); const [y, m, dd] = a.split("-"); return { dia: `${dd}/${m}`, hora: h.slice(0, 5), completa: `${dd}/${m}/${y} ${h.slice(0, 5)}` }; };
+
+/* ---------- Recorte conforme os filtros ---------- */
+function recorte() {
+  const total = DADOS.colunas.length;
+  const ini = estado.periodo > 0 ? Math.max(0, total - estado.periodo) : 0;
+  const idx = [...Array(total).keys()].slice(ini);
+  const busca = estado.busca.trim().toLowerCase();
+  let rotinas = DADOS.rotinas.filter(r => !busca || r.toLowerCase().includes(busca));
+  if (estado.problemas) {
+    rotinas = rotinas.filter(r => idx.some(i => { const c = DADOS.celulas[r][i]; return c && PROBLEMA.has(c.status); }));
+  }
+  return { idx, rotinas };
+}
+
+/* ---------- Cartões de resumo da última execução ---------- */
+function desenharResumo() {
+  const ultimo = DADOS.colunas.length - 1;
+  if (ultimo < 0) { $("tiles").innerHTML = ""; return; }
+  const itens = DADOS.rotinas.map(r => [r, DADOS.celulas[r][ultimo]]).filter(([, c]) => c);
+  const conta = st => itens.filter(([, c]) => c.status === st).length;
+  const lentas = conta("lenta") + conta("atencao"), erros = conta("erro") + conta("pulada");
+  const total = itens.reduce((s, [, c]) => s + (c.s || 0), 0);
+  const login = DADOS.celulas["Login"] ? DADOS.celulas["Login"][ultimo] : null;
+  const nomes = st => itens.filter(([, c]) => st.includes(c.status)).map(([r]) => r).join(", ");
+  const d = fmtData(DADOS.colunas[ultimo].data);
+  // Status geral da execução: o pior status encontrado entre os itens.
+  const geral = erros ? "erro" : conta("lenta") ? "lenta" : conta("atencao") ? "atencao" : "normal";
+  const textoGeral = { erro: "Com erro", lenta: "Com lentidão", atencao: "Pouco acima do normal", normal: "Tudo normal" }[geral];
+  $("tiles").innerHTML = `
+    <div class="tile"><div class="lbl">Última execução</div>
+      <div class="val"><span class="badge st-${geral}">${STATUS[geral].ic}</span>${d.dia} ${d.hora}</div>
+      <div class="det">${textoGeral} · ID ${esc(DADOS.colunas[ultimo].id)}</div></div>
+    <div class="tile"><div class="lbl">Tempo total</div>
+      <div class="val">${fmtS(total)}</div>
+      <div class="det">Login: ${login ? fmtS(login.s) : "-"}</div></div>
+    <div class="tile"><div class="lbl">Mais lentas que o normal</div>
+      <div class="val"><span class="badge st-${conta("lenta") ? "lenta" : lentas ? "atencao" : "normal"}">${conta("lenta") ? "▲▲" : lentas ? "▲" : "✓"}</span>${lentas}</div>
+      <div class="det">${esc(nomes(["lenta", "atencao"])) || "Nenhuma"}</div></div>
+    <div class="tile"><div class="lbl">Com erro</div>
+      <div class="val"><span class="badge st-${erros ? "erro" : "normal"}">${erros ? "✕" : "✓"}</span>${erros}</div>
+      <div class="det">${esc(nomes(["erro", "pulada"])) || "Nenhuma"}</div></div>`;
+}
+
+/* ---------- Legenda ---------- */
+function desenharLegenda() {
+  const p = DADOS.parametros;
+  const desc = {
+    normal: `até +${p.atencao_pct}%`, atencao: `+${p.atencao_pct}% a +${p.lenta_pct}%`, lenta: `acima de +${p.lenta_pct}%`,
+    erro: "falhou", pulada: "não executada", sem_base: `menos de ${p.minimo} execuções`,
+  };
+  $("legenda").innerHTML = Object.entries(STATUS).map(([k, s]) =>
+    `<span><span class="chip st-${k}">${s.ic}</span><b>${s.nome}</b>&nbsp;${desc[k]}</span>`).join("");
+}
+
+/* ---------- Grade (mapa de calor) ---------- */
+function textoCelula(c) {
+  if (c.status === "erro") return "erro";
+  if (c.status === "pulada") return "–";
+  return estado.valor === "var" && c.var != null ? fmtVar(c.var) : fmtS(c.s);
+}
+function desenharMapa() {
+  const { idx, rotinas } = recorte();
+  if (!DADOS.colunas.length) { $("mapa").innerHTML = `<div class="vazio-msg">Nenhuma execução encontrada ainda.<br>O mapa é preenchido a cada execução do cronômetro.</div>`; return; }
+  if (!rotinas.length) { $("mapa").innerHTML = `<div class="vazio-msg">Nenhuma rotina com os filtros atuais.</div>`; return; }
+  const ultimo = DADOS.colunas.length - 1;
+  let h = `<table class="heat"><thead><tr><th class="nome" scope="col"><span class="m">Rotina · normal</span></th>`;
+  for (const i of idx) {
+    const d = fmtData(DADOS.colunas[i].data);
+    h += `<th scope="col" class="${i === ultimo ? "ultima" : ""}" title="${d.completa} · ID ${esc(DADOS.colunas[i].id)}">${d.dia}<br>${d.hora}</th>`;
+  }
+  h += `</tr></thead><tbody>`;
+  for (const r of rotinas) {
+    const n = DADOS.normal_atual[r];
+    h += `<tr><th scope="row" class="nome${r === "Login" ? " login" : ""}" title="${esc(r)}"><span class="n">${esc(r)}</span><span class="m">normal: ${n == null ? "sem histórico" : fmtS(n)}</span></th>`;
+    for (const i of idx) {
+      const c = DADOS.celulas[r][i];
+      if (!c) { h += `<td><div class="cell st-vazio" aria-label="${esc(r)}: não fazia parte desta execução"></div></td>`; continue; }
+      const st = STATUS[c.status];
+      h += `<td><button type="button" class="cell st-${c.status}" data-r="${esc(r)}" data-i="${i}"
+              aria-label="${esc(r)}, ${fmtData(DADOS.colunas[i].data).completa}: ${st.nome}, ${fmtS(c.s)}">
+              <span class="ic">${st.ic}</span><span>${esc(textoCelula(c))}</span></button></td>`;
+    }
+    h += `</tr>`;
+  }
+  $("mapa").innerHTML = h + `</tbody></table>`;
+  $("mapa").scrollLeft = $("mapa").scrollWidth;  // abre mostrando as execuções mais recentes
+}
+
+/* ---------- Visão em tabela (acessível / para copiar) ---------- */
+function desenharTabela() {
+  const { idx, rotinas } = recorte();
+  const linhas = [];
+  for (const i of [...idx].reverse()) for (const r of rotinas) {
+    const c = DADOS.celulas[r][i];
+    if (!c || (estado.problemas && !PROBLEMA.has(c.status))) continue;
+    linhas.push(`<tr><td>${fmtData(DADOS.colunas[i].data).completa}</td><td>${esc(r)}</td>
+      <td class="num">${fmtS(c.s)}</td><td class="num">${c.normal == null ? "-" : fmtS(c.normal)}</td>
+      <td class="num">${fmtVar(c.var)}</td><td><span class="chip st-${c.status}">${STATUS[c.status].ic}</span> ${STATUS[c.status].nome}</td>
+      <td>${esc(c.erro)}</td></tr>`);
+  }
+  $("tabela").innerHTML = linhas.length
+    ? `<table class="lista"><thead><tr><th>Execução</th><th>Rotina</th><th class="num">Tempo</th><th class="num">Normal</th><th class="num">Variação</th><th>Status</th><th>Erro</th></tr></thead><tbody>${linhas.join("")}</tbody></table>`
+    : `<div class="vazio-msg">Nada para mostrar com os filtros atuais.</div>`;
+}
+
+/* ---------- Tooltip (hover e foco pelo teclado) ---------- */
+function mostrarTip(btn, x, y) {
+  const r = btn.dataset.r, i = +btn.dataset.i, c = DADOS.celulas[r][i], col = DADOS.colunas[i];
+  const st = STATUS[c.status];
+  $("tip").innerHTML = `<div class="t"><span class="chip st-${c.status}">${st.ic}</span> ${esc(r)}</div>
+    <div class="r">Execução <b>${fmtData(col.data).completa}</b></div>
+    <div class="r">Tempo <b>${fmtS(c.s)}</b></div>
+    <div class="r">Normal (mediana) <b>${c.normal == null ? "sem histórico" : fmtS(c.normal)}</b></div>
+    <div class="r">Variação <b>${fmtVar(c.var)}</b></div>
+    <div class="r">Status <b>${st.nome}</b></div>
+    ${c.erro ? `<div class="e">${esc(c.erro)}</div>` : ""}
+    ${c.caminho ? `<div class="e">${esc(c.caminho)}</div>` : ""}`;
+  const tip = $("tip"); tip.style.display = "block";
+  const w = tip.offsetWidth, hgt = tip.offsetHeight;
+  tip.style.left = Math.min(x + 14, innerWidth - w - 8) + "px";
+  tip.style.top = (y + 14 + hgt > innerHeight ? y - hgt - 10 : y + 14) + "px";
+}
+const esconderTip = () => { $("tip").style.display = "none"; };
+$("mapa").addEventListener("mousemove", e => { const b = e.target.closest("button.cell"); b ? mostrarTip(b, e.clientX, e.clientY) : esconderTip(); });
+$("mapa").addEventListener("mouseleave", esconderTip);
+$("mapa").addEventListener("focusin", e => { const b = e.target.closest("button.cell"); if (b) { const q = b.getBoundingClientRect(); mostrarTip(b, q.right, q.top); } });
+$("mapa").addEventListener("focusout", esconderTip);
+
+/* ---------- Filtros: ligam o estado e redesenham ---------- */
+function desenhar() {
+  $("mapa").hidden = estado.visao !== "mapa"; $("tabela").hidden = estado.visao !== "tabela";
+  estado.visao === "mapa" ? desenharMapa() : desenharTabela();
+  salvarEstado();
+}
+function ligarFiltros() {
+  $("f-periodo").value = String(estado.periodo);
+  $("f-busca").value = estado.busca;
+  $("f-problemas").checked = estado.problemas;
+  $("f-auto").checked = estado.auto;
+  document.querySelectorAll("[data-valor]").forEach(b => b.setAttribute("aria-pressed", b.dataset.valor === estado.valor));
+  document.querySelectorAll("[data-visao]").forEach(b => b.setAttribute("aria-pressed", b.dataset.visao === estado.visao));
+
+  $("f-periodo").onchange = e => { estado.periodo = +e.target.value; desenhar(); };
+  $("f-busca").oninput = e => { estado.busca = e.target.value; desenhar(); };
+  $("f-problemas").onchange = e => { estado.problemas = e.target.checked; desenhar(); };
+  $("f-auto").onchange = e => { estado.auto = e.target.checked; salvarEstado(); agendarAtualizacao(); };
+  document.querySelectorAll("[data-valor]").forEach(b => b.onclick = () => {
+    estado.valor = b.dataset.valor; ligarFiltros(); desenhar(); });
+  document.querySelectorAll("[data-visao]").forEach(b => b.onclick = () => {
+    estado.visao = b.dataset.visao; ligarFiltros(); desenhar(); });
+}
+
+/* "Atualizar sozinho": recarrega a página para ler o HTML regerado pela próxima execução. */
+let timerAtualizacao = null;
+function agendarAtualizacao() {
+  clearTimeout(timerAtualizacao);
+  if (estado.auto) timerAtualizacao = setTimeout(() => location.reload(), 5 * 60 * 1000);
+}
+
+/* ---------- Inicialização ---------- */
+const g = fmtData(DADOS.gerado_em);
+$("sub").textContent = `${DADOS.colunas.length} execuções · ${DADOS.rotinas.length} itens (login + rotinas) · atualizado em ${g.completa}`;
+$("nota").textContent = `"Normal" = mediana das últimas ${DADOS.parametros.janela} execuções sem erro da mesma rotina, anteriores a cada célula. ` +
+  `Passe o mouse (ou use Tab) nas células para ver detalhes.`;
+desenharResumo(); desenharLegenda(); ligarFiltros(); desenhar(); agendarAtualizacao();
+</script>
+</body>
+</html>

@@ -163,6 +163,15 @@ Rotina 2: ...                                             -> tempo "Rotina 2"
 - O codigo MFA so e aceito se o e-mail chegou depois do clique em "Entrar" da sessao atual.
 - Janela TOTVS **"Excedeu numero de licencas"**: reconhecida na tela (inclusive enquanto o robo espera um elemento), gravada como `ERRO LICENCA PROTHEUS` no `RPA.TIMER`, gera e-mail proprio e **nao** entra nas novas tentativas.
 
+### Mapa de calor dos tempos
+
+Ao final de cada execucao e gerado `log_playwright/mapa_calor.html` (abre direto no navegador, sem internet), lendo todos os `tempos_rotinas_*.json`:
+
+- linhas = Login + rotinas; colunas = execucoes (mais recente a direita); celula = tempo;
+- **normal** = mediana das ultimas 10 execucoes sem erro da mesma rotina; cores com icone: ✓ normal (ate +15%), ▲ atencao (+15% a +30%), ▲▲ lenta (> +30%, mesmo limite do e-mail), ✕ erro, – nao executada;
+- filtros de periodo, nome e "so rotinas com problema", valor em segundos ou % vs normal, visao em tabela, tooltip com detalhes/erro e opcao "Atualizar sozinho" (recarrega a cada 5 min);
+- limites ajustaveis no topo de `mapa_calor.py`; para regerar manualmente: `python mapa_calor.py [pasta_log_playwright]`.
+
 Testes do parser de rotinas: `python -m unittest discover -s tests -v`
 
 O codigo aceita valores booleanos reais no JSON, por exemplo `true` e `false`. Para `Headless`, tambem sao reconhecidos textos como `true`, `false`, `1`, `0`, `yes` e `no`.

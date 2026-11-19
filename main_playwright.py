@@ -18,7 +18,8 @@ LÓGICA GERAL
 4. Os tempos (Login, Rotina 1, Rotina 2, ...) vão para:
    - o log geral (resumo no final) e um log de cada item em log_playwright/rotinas/;
    - a tabela RPA.TIMER (linhas "Tempo Login: Ns", "Tempo Rotina 'X': Ns");
-   - log_playwright/tempos_rotinas_<id>.json.
+   - log_playwright/tempos_rotinas_<id>.json;
+   - log_playwright/mapa_calor.html (mapa de calor de todas as execuções, ver mapa_calor.py).
 5. Falhas:
    - no login: novas tentativas da execução inteira (ExecutionRetries) e e-mail;
    - em uma rotina: e-mail de erro, a rotina fica marcada com erro e a próxima segue;
@@ -56,6 +57,7 @@ from erros_protheus import DESCRICAO_LICENCA, LicencaExcedidaError, LICENCA_REGE
 import graph
 import LogBanco
 import logging_config
+import mapa_calor
 import rotinas as rotinas_cfg
 from rotinas import Rotina, ResultadoRotina
 
@@ -1437,6 +1439,12 @@ def exec_playwright_from_main(
                     logger.info(rotinas_cfg.formatar_resumo(resultados))
                     relatorio = rotinas_cfg.salvar_relatorio(resultados, LogBanco.LOG_DIR, LogBanco.id_execucao)
                     logger.info("Relatório de tempos salvo em %s", relatorio)
+                    # Atualiza o mapa de calor com esta execução. Falha aqui não afeta o cronômetro.
+                    try:
+                        mapa = mapa_calor.gerar_mapa_calor(LogBanco.LOG_DIR)
+                        logger.info("Mapa de calor atualizado em %s", mapa)
+                    except Exception:
+                        logger.exception("Não foi possível gerar o mapa de calor")
                 LogBanco.salvar()
     except Exception as global_err:
         if isinstance(global_err, LicencaExcedidaError):
