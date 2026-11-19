@@ -254,7 +254,8 @@ def registrar_timer(id_execucao, descricao, sistema, usuario, erro, tempo_execuc
             'timestamp_str': timestamp_str
         })
         connection.commit()
-        logger.info(f'Registro inserido: {descricao} - Erro: {erro}')
+        # DEBUG: são ~1 registro por segundo (cronômetro); em INFO poluíam o log.
+        logger.debug(f'Registro inserido: {descricao} - Erro: {erro}')
     except Exception as e:
         logger.error(f'Erro ao inserir no banco: {e}')
     finally:

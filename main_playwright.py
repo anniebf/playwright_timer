@@ -36,6 +36,12 @@ CONFIG_PATH = BASE_DIR / "config.json"
 
 logger = logging_config.get_logger("main_playwright_from_main")
 BUILD_VERSION = "2026-11-18-login-unico-rotinas"
+# Resume uma exceção em uma linha (o Playwright inclui um "Call log" de dezenas de linhas).
+def resumir_erro(erro: BaseException, limite: int = 200) -> str:
+    primeira = next((linha.strip() for linha in str(erro).splitlines() if linha.strip()), type(erro).__name__)
+    return primeira[:limite]
+
+
 # Intervalo (s) entre verificações da janela de licença enquanto espera um elemento.
 INTERVALO_VERIFICACAO_LICENCA = 3
 
@@ -50,7 +56,17 @@ JS_LOCALIZAR_ITEM_MENU = """
   const norm = s => (s || '').replace(/<[^>]+>/g, '').replace(/\\(\\d+\\)\\s*$/, '')
                              .replace(/\\s+/g, ' ').trim().toLowerCase();
   const filhos = e => [...e.children].filter(c => c.tagName === 'WA-MENU-ITEM');
-  const visivel = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  // Visível de verdade: tem tamanho E não está escondido por CSS (o Protheus esconde o menu
+  // com visibility:hidden quando a rotina abre - só o tamanho não basta).
+  const visivel = e => {
+    const r = e.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) return false;
+    const alvo = (e.shadowRoot && e.shadowRoot.querySelector('span.caption')) || e;
+    if (alvo.checkVisibility) {
+      return alvo.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true, opacityProperty: true, visibilityProperty: true });
+    }
+    return getComputedStyle(alvo).visibility !== 'hidden';
+  };
   const escopo = escopoId
     ? document.getElementById(escopoId)
     : [...document.querySelectorAll('wa-menu')].find(m => filhos(m).some(visivel));
@@ -85,7 +101,17 @@ JS_ESTADO_ITEM_MENU = """
 (id) => {
   const item = document.getElementById(id);
   if (!item) return { visivel: false, aberta: false };
-  const visivel = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  // Visível de verdade: tem tamanho E não está escondido por CSS (o Protheus esconde o menu
+  // com visibility:hidden quando a rotina abre - só o tamanho não basta).
+  const visivel = e => {
+    const r = e.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) return false;
+    const alvo = (e.shadowRoot && e.shadowRoot.querySelector('span.caption')) || e;
+    if (alvo.checkVisibility) {
+      return alvo.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true, opacityProperty: true, visibilityProperty: true });
+    }
+    return getComputedStyle(alvo).visibility !== 'hidden';
+  };
   const sub = [...item.children].filter(c => c.tagName === 'WA-MENU-ITEM');
   return { visivel: visivel(item), aberta: sub.some(visivel) };
 }
@@ -547,7 +573,6 @@ class ProtheusPlaywrightMainFlow:
         except PlaywrightError as screenshot_error:
             logger.warning("Nao foi possivel salvar screenshot do timeout: %s", screenshot_error)
         self._atualizar_acao(f"Falha: elemento '{texto_ou_seletor}' não encontrado após {timeout}ms")
-        logger.error(err_msg)
         raise PlaywrightTimeoutError(err_msg)
 
     # função para preencher o campo de empresa/filial, caso a variável de ambiente esteja definida
@@ -841,8 +866,9 @@ class ProtheusPlaywrightMainFlow:
             self._fechar_dialogo()  # botão "Fechar" da janela TOTVS
             return ResultadoRotina(rotina.nome, rotina.caminho, round(segundos, 2), False, DESCRICAO_LICENCA)
 
-        erro_resumido = " ".join(str(erro).split())[:300]
-        logger.exception("Rotina '%s' falhou após %.1fs: %s", rotina.nome, segundos, erro_resumido)
+        erro_resumido = resumir_erro(erro)
+        logger.error("Rotina '%s' falhou após %.1fs: %s", rotina.nome, segundos, erro_resumido)
+        logger.debug("Detalhes técnicos da falha em '%s'", rotina.nome, exc_info=erro)
         enviar_erro_execucao(erro, cronometro.obter_acao())
         return ResultadoRotina(rotina.nome, rotina.caminho, round(segundos, 2), False, erro_resumido)
 
@@ -928,15 +954,27 @@ class ProtheusPlaywrightMainFlow:
         """Pasta: espera abrir (subitens visíveis). Rotina: espera o menu sumir (a tela da
         rotina ocupa a página). Se o clique só selecionou o item, clica de novo."""
         tentativas = max(1, int(CONFIG.get("MenuRetries", 2)))
-        espera_ms = int(CONFIG.get("MenuStepTimeout", 15000))
+        # Abrir uma rotina pode demorar bem mais que abrir uma pasta.
+        espera_ms = (int(CONFIG.get("MenuStepTimeout", 15000)) if item["pasta"]
+                     else int(CONFIG.get("RotinaAbrirTimeout", 60000)))
         item_id = item["id"]
 
         for tentativa in range(1, tentativas + 1):
-            if frame.evaluate(JS_MARCAR_ALVO_MENU, item_id):
-                frame.locator(f'[data-rpa-alvo="{item_id}"]').first.click(timeout=timeout)
-            else:
-                # Sem o texto no shadow DOM: clica na linha do título do item.
-                frame.locator(f"wa-menu-item#{item_id}").click(position={"x": 60, "y": 10}, timeout=timeout)
+            # Antes de repetir, confere de novo: a rotina pode ter aberto devagar.
+            # Clicar de novo poderia abrir a rotina duas vezes.
+            if tentativa > 1 and self._aguardar_efeito_clique(frame, item, 0):
+                return
+            try:
+                if frame.evaluate(JS_MARCAR_ALVO_MENU, item_id):
+                    frame.locator(f'[data-rpa-alvo="{item_id}"]').first.click(timeout=min(timeout, 10000))
+                else:
+                    # Sem o texto no shadow DOM: clica na linha do título do item.
+                    frame.locator(f"wa-menu-item#{item_id}").click(position={"x": 60, "y": 10}, timeout=min(timeout, 10000))
+            except PlaywrightTimeoutError:
+                # O item ficou invisível antes do clique: a tela mudou (ex.: rotina abrindo).
+                if self._aguardar_efeito_clique(frame, item, 2000):
+                    return
+                raise
 
             if self._aguardar_efeito_clique(frame, item, espera_ms):
                 return
@@ -952,7 +990,7 @@ class ProtheusPlaywrightMainFlow:
     # espera o efeito do clique: pasta aberta ou rotina aberta (menu escondido)
     def _aguardar_efeito_clique(self, frame, item: dict, espera_ms: int) -> bool:
         deadline = monotonic() + espera_ms / 1000
-        while monotonic() < deadline:
+        while True:  # confere ao menos uma vez (espera_ms=0 = só conferir agora)
             try:
                 estado = frame.evaluate(JS_ESTADO_ITEM_MENU, item["id"])
             except PlaywrightError:
@@ -961,8 +999,9 @@ class ProtheusPlaywrightMainFlow:
                 return True
             if not item["pasta"] and not estado["visivel"]:
                 return True
+            if monotonic() >= deadline:
+                return False
             sleep(0.3)
-        return False
 
     # espera o item aparecer na árvore do menu (dentro do pai informado)
     def _aguardar_item_menu(self, escopo_id: str | None, texto: str, timeout: int):
@@ -1247,14 +1286,8 @@ class ProtheusPlaywrightMainFlow:
                         textos.append(texto[:1000])
                 except PlaywrightError:
                     continue
-            logger.info(
-                "Estado do menu: URL=%s viewport=%s frames=%d textos=%s screenshot=%s",
-                self.page.url,
-                self.page.viewport_size,
-                len(self.page.frames),
-                textos,
-                screenshot_path,
-            )
+            logger.info("Estado do menu salvo em %s (frames=%d)", screenshot_path.name, len(self.page.frames))
+            logger.debug("Textos dos frames do menu: %s", textos)
         except (OSError, PlaywrightError) as error:
             logger.warning("Nao foi possivel registrar estado inicial do menu: %s", error)
 
@@ -1437,7 +1470,7 @@ def exec_playwright_from_main(
                         pass
 
                 status_final = "SIM"
-                erro_resumido = " ".join(str(erro).split())
+                erro_resumido = resumir_erro(erro)
                 if isinstance(erro, LicencaExcedidaError):
                     descricao_final = DESCRICAO_LICENCA
                 else:
@@ -1454,7 +1487,8 @@ def exec_playwright_from_main(
                         round(segundos_login, 2), False, descricao_final[:300],
                     ))
                     cronometro.registrar_tempo("Login", segundos_login, False, descricao_final)
-                logger.exception("Exceção não tratada capturada na execução do fluxo principal: %s", e)
+                logger.error("Falha na execução: %s", erro_resumido)
+                logger.debug("Detalhes técnicos da falha na execução", exc_info=e)
                 cronometro.marcar_erro()
                 cronometro.atualizar_acao(
                     f"Exceção não tratada capturada na execução do fluxo principal: {erro_resumido}"
@@ -1502,7 +1536,7 @@ def exec_playwright_from_main(
             logger.error("Execução não realizada: %s", global_err)
             enviar_erro_licenca("Login (nenhuma rotina executada)", cronometro.obter_acao())
             return False
-        logger.exception("Erro crítico no gerenciador do Playwright: %s", global_err)
+        logger.debug("Detalhes técnicos do erro no gerenciador do Playwright", exc_info=global_err)
         if login_retry_requested and not _login_retry_attempted:
             logger.warning(
                 "Fluxo interrompido no preenchimento do usuário do iframe; "
