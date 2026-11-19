@@ -523,11 +523,14 @@ class ProtheusPlaywrightMainFlow:
             return None
         # Loop principal para aguardar e clicar no elemento encontrado
         proxima_verificacao_licenca = monotonic()
+        ultimo_erro_clique: str | None = None  # motivo da última falha de clique (para o log)
         while monotonic() < deadline:
             # Se o Protheus mostrar "Excedeu numero de licenças", não adianta esperar o timeout.
             if monotonic() >= proxima_verificacao_licenca:
                 self.verificar_licenca()
                 proxima_verificacao_licenca = monotonic() + INTERVALO_VERIFICACAO_LICENCA
+            target = None
+            clique_tentado = False
             try:
                 frames = list(self.page.frames)
                 for frame in frames:
@@ -537,7 +540,8 @@ class ProtheusPlaywrightMainFlow:
                         restante_ms = max(1, int((deadline - monotonic()) * 1000))
                         target.wait_for(state="visible", timeout=min(1000, restante_ms))
                         self._atualizar_acao(f"Elemento '{texto_ou_seletor}' encontrado; executando {acao}")
-                        
+
+                        clique_tentado = True
                         if duplo_clique:
                             target.dblclick(timeout=min(3000, restante_ms))
                         else:
@@ -547,13 +551,28 @@ class ProtheusPlaywrightMainFlow:
                         self._atualizar_acao(f"{acao.capitalize()} realizado em '{texto_ou_seletor}'")
                         return
             except (PlaywrightTimeoutError, PlaywrightError) as err:
-                logger.debug("Tentando interagir com '%s'... (%s)", texto_ou_seletor, err)
+                # O clique pode ter funcionado e o erro vir depois (ex.: "Cancelar" fecha a
+                # janela enquanto o Playwright ainda confirma o clique). Se o elemento saiu
+                # da tela, o clique teve efeito: segue o fluxo em vez de procurar de novo.
+                if clique_tentado and target is not None and self._saiu_da_tela(target):
+                    logger.info("Clique em '%s' confirmado: o elemento saiu da tela após o clique", texto_ou_seletor)
+                    self._atualizar_acao(f"{acao.capitalize()} realizado em '{texto_ou_seletor}'")
+                    return
+                if clique_tentado:
+                    motivo = resumir_erro(err)
+                    if motivo != ultimo_erro_clique:  # registra cada motivo uma vez só
+                        logger.warning("Clique em '%s' falhou (%s); tentando de novo", texto_ou_seletor, motivo)
+                        ultimo_erro_clique = motivo
+                else:
+                    logger.debug("Tentando interagir com '%s'... (%s)", texto_ou_seletor, err)
 
             sleep(0.5)
 
-        err_msg = f"Elemento '{texto_ou_seletor}' não foi encontrado dentro de {timeout}ms"
-        if pressionar_escape_ao_falhar:
-            self.page.keyboard.press("Escape")
+        if ultimo_erro_clique:
+            err_msg = (f"Elemento '{texto_ou_seletor}' encontrado, mas o clique falhou "
+                       f"durante {timeout}ms: {ultimo_erro_clique}")
+        else:
+            err_msg = f"Elemento '{texto_ou_seletor}' não foi encontrado dentro de {timeout}ms"
         logger.error(
             "%s URL atual: %s; frames: %d",
             err_msg,
@@ -572,8 +591,24 @@ class ProtheusPlaywrightMainFlow:
             )
         except PlaywrightError as screenshot_error:
             logger.warning("Nao foi possivel salvar screenshot do timeout: %s", screenshot_error)
+        # Esc só DEPOIS do print: antes, o print mostrava a tela já alterada pelo Esc.
+        if pressionar_escape_ao_falhar:
+            self.page.keyboard.press("Escape")
         self._atualizar_acao(f"Falha: elemento '{texto_ou_seletor}' não encontrado após {timeout}ms")
         raise PlaywrightTimeoutError(err_msg)
+
+    # depois de um clique com erro: o elemento sumiu/ficou invisível? (= o clique teve efeito)
+    def _saiu_da_tela(self, target: Locator, espera_ms: int = 1500) -> bool:
+        deadline = monotonic() + espera_ms / 1000
+        while True:
+            try:
+                if not target.is_visible():
+                    return True
+            except PlaywrightError:
+                return True  # elemento descartado junto com a janela
+            if monotonic() >= deadline:
+                return False
+            sleep(0.25)
 
     # função para preencher o campo de empresa/filial, caso a variável de ambiente esteja definida
     def preencher_empresa_filial(self,cronometro) -> bool:
