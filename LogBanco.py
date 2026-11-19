@@ -146,16 +146,19 @@ class CronometroExecucao:
 
             self._stop_event.wait(1)
 
-    def registrar_tempo(self, item: str, segundos: float, sucesso: bool) -> None:
+    def registrar_tempo(self, item: str, segundos: float, sucesso: bool, erro: str = '') -> None:
         """Grava uma linha com o tempo de UM item da execução (o login ou uma rotina).
 
         TEMPO_EXECUCAO recebe os segundos do item. A descrição começa com 'Tempo',
         e não com 'Finalizando execução', para não entrar na média de resultado().
-        Ex.: "[0042s] - Tempo Login: 35.2s" / "[0055s] - Tempo Rotina 'Pedidos': 12.3s (com erro)"
+        Ex.: "[0042s] - Tempo Login: 35.2s"
+             "[0055s] - Tempo Rotina 'Pedidos': 12.3s (com erro: Elemento 'Visualizar' não foi encontrado)"
+        Esse formato é lido de volta pelo mapa de calor (mapa_calor.carregar_execucoes_banco).
         """
         decorrido = int(time.monotonic() - self._inicio_monotonic) if self._inicio_monotonic else 0
         status = 'NAO' if sucesso else 'ERRO'
-        sufixo = '' if sucesso else ' (com erro)'
+        erro = ' '.join(str(erro or '').split())[:300]
+        sufixo = '' if sucesso else (f' (com erro: {erro})' if erro else ' (com erro)')
         registrar_timer(
             self.id_execucao,
             formatar_descricao(status, f"Tempo {item}: {segundos:.1f}s{sufixo}", decorrido),
@@ -303,7 +306,7 @@ def salvar():
             primeiro_timestamp = timestamp
         segundos = max(0, int((timestamp - primeiro_timestamp).total_seconds()))
         nivel = registro.group('level')
-        status = 'ERRO' if nivel in {'ERROR', 'CRITICAL'} else 'WARN' if nivel == 'WARNING' else 'OK'
+        status = 'ERRO' if nivel in {'ERROR', 'CRITICAL'} else 'WARN' if nivel == 'WARNING' else 'NAO'
         descricao = formatar_descricao(
             status,
             registro.group('message'),

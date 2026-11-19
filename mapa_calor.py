@@ -3,9 +3,15 @@ mapa_calor.py - Gera o mapa de calor (HTML interativo) com o tempo das rotinas.
 
 LÓGICA GERAL
 ------------
-1. Cada execução do cronômetro grava log_playwright/tempos_rotinas_<id>.json
-   (ver rotinas.salvar_relatorio) com o tempo do Login e de cada rotina.
-2. Este módulo lê todos esses JSONs e monta uma grade:
+1. FONTE DOS DADOS (padrão: banco):
+   - banco: tabela RPA.TIMER. Cada execução grava uma linha por item, no formato
+       "[0278s] - Tempo Login: 70.9s"
+       "[0345s] - Tempo Rotina 'Pedidos de Compra': 64.5s (com erro: <mensagem>)"
+     (ver LogBanco.CronometroExecucao.registrar_tempo). Assim o mapa junta as
+     execuções de qualquer máquina (servidor Docker, PC de teste...).
+   - arquivos: log_playwright/tempos_rotinas_<id>.json (só da máquina local).
+     Usado automaticamente se o banco estiver indisponível.
+2. Este módulo transforma essas linhas em uma grade:
        linhas  = Login + rotinas
        colunas = execuções (mais antiga -> mais recente)
        célula  = tempo daquela rotina naquela execução
@@ -23,17 +29,23 @@ LÓGICA GERAL
    visão em tabela: log_playwright/mapa_calor.html. Ele é regenerado ao final de
    cada execução; basta abrir/atualizar no navegador.
 
-Uso manual (regera a partir dos JSONs existentes):
-    python mapa_calor.py                 # usa ./log_playwright
-    python mapa_calor.py C:\\caminho\\log_playwright
+Uso manual:
+    python mapa_calor.py                         # banco, últimos 60 dias, grava em ./log_playwright
+    python mapa_calor.py log_playwright --dias 90
+    python mapa_calor.py log_playwright --fonte arquivos   # só os JSONs locais
 """
 from __future__ import annotations
 
+import argparse
 import json
+import logging
+import os
+import re
 import statistics
-import sys
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger("mapa_calor")
 
 # ---------------------------------------------------------------------------
 # Parâmetros da classificação (ajuste aqui se o critério de "lento" mudar)
@@ -69,6 +81,69 @@ def carregar_execucoes(pasta: Path) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# 1b) Leitura do banco (RPA.TIMER)
+# ---------------------------------------------------------------------------
+# "[0278s] - Tempo Login: 70.9s"  |  "[0345s] - Tempo Rotina 'X': 64.5s (com erro: msg)"
+LINHA_TEMPO = re.compile(
+    r"^\[\d+s\] - Tempo (?:(?P<login>Login)|Rotina '(?P<rotina>.+?)'): (?P<segundos>[\d.]+)s"
+    r"(?P<falha> \(com erro(?:: (?P<erro>.*))?\))?\s*$",
+    re.DOTALL,
+)
+
+SQL_TEMPOS = """
+    SELECT ID_EXECUCAO, DESCRICAO, HORARIO_EXECUCAO
+      FROM RPA.TIMER
+     WHERE SISTEMA = :sistema
+       AND DESCRICAO LIKE '%- Tempo %'
+       AND HORARIO_EXECUCAO >= SYSDATE - :dias
+     ORDER BY HORARIO_EXECUCAO, ID_EXECUCAO
+"""
+
+
+def linhas_para_execucoes(linhas) -> list[dict]:
+    """Converte linhas (ID_EXECUCAO, DESCRICAO, HORARIO_EXECUCAO) no mesmo formato dos JSONs.
+
+    Linhas que não são do formato "Tempo ..." são ignoradas (ex.: logs parecidos).
+    A data da execução é o horário da primeira linha de tempo daquele ID.
+    """
+    por_id: dict = {}
+    for id_execucao, descricao, horario in linhas:
+        achado = LINHA_TEMPO.match(str(descricao or "").strip())
+        if not achado:
+            continue
+        execucao = por_id.setdefault(id_execucao, {
+            "id_execucao": id_execucao,
+            "gerado_em": horario.strftime("%Y-%m-%d %H:%M:%S"),
+            "rotinas": [],
+        })
+        sucesso = achado.group("falha") is None
+        execucao["rotinas"].append({
+            "nome": "Login" if achado.group("login") else achado.group("rotina"),
+            "caminho": "",
+            "segundos": float(achado.group("segundos")),
+            "sucesso": sucesso,
+            "erro": "" if sucesso else (achado.group("erro") or "erro"),
+        })
+    return sorted(por_id.values(), key=lambda e: (e["gerado_em"], e["id_execucao"]))
+
+
+def carregar_execucoes_banco(dias: int = 60, sistema: str = "PROTHEUS") -> list[dict]:
+    """Lê as linhas "Tempo ..." do RPA.TIMER dos últimos `dias` (mesmas credenciais do LogBanco)."""
+    import oracledb  # importado aqui para os testes e o modo "arquivos" não dependerem do Oracle
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+    oracledb.defaults.fetch_lobs = False  # DESCRICAO pode ser CLOB: devolve como texto
+    conexao = oracledb.connect(user=os.getenv("usernamedb"), password=os.getenv("passworddb"), dsn=os.getenv("dsn"))
+    try:
+        with conexao.cursor() as cursor:
+            cursor.execute(SQL_TEMPOS, {"sistema": sistema, "dias": dias})
+            return linhas_para_execucoes(cursor.fetchall())
+    finally:
+        conexao.close()
+
+
+# ---------------------------------------------------------------------------
 # 2) Cálculo do "normal" e classificação de cada célula
 # ---------------------------------------------------------------------------
 def classificar(segundos: float, normal: float | None, sucesso: bool, erro: str) -> str:
@@ -85,7 +160,7 @@ def classificar(segundos: float, normal: float | None, sucesso: bool, erro: str)
     return "normal"
 
 
-def calcular_mapa(execucoes: list[dict]) -> dict:
+def calcular_mapa(execucoes: list[dict], fonte: str = "arquivos") -> dict:
     """Monta a estrutura usada pelo HTML: colunas, linhas e células classificadas."""
     # Ordem das linhas: Login primeiro, depois as rotinas na ordem em que aparecem.
     rotinas: list[str] = []
@@ -137,6 +212,7 @@ def calcular_mapa(execucoes: list[dict]) -> dict:
     }
     return {
         "gerado_em": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "fonte": fonte,
         "parametros": {
             "janela": JANELA_NORMAL,
             "minimo": MINIMO_HISTORICO,
@@ -163,15 +239,38 @@ def gerar_html(mapa: dict) -> str:
     return template.replace("/*__DADOS__*/null", dados_json)
 
 
-def gerar_mapa_calor(pasta_logs: Path, destino: Path | None = None) -> Path:
-    """Lê os JSONs da pasta e grava o HTML. Retorna o caminho do arquivo gerado."""
+def gerar_mapa_calor(
+    pasta_logs: Path,
+    destino: Path | None = None,
+    fonte: str = "banco",
+    dias: int = 60,
+) -> Path:
+    """Gera o HTML a partir do banco (padrão) ou dos JSONs da pasta.
+
+    Se o banco falhar (rede, credencial...), usa os JSONs locais para não ficar sem mapa.
+    """
     pasta_logs = Path(pasta_logs)
     destino = destino or (pasta_logs / NOME_ARQUIVO_HTML)
-    mapa = calcular_mapa(carregar_execucoes(pasta_logs))
-    destino.write_text(gerar_html(mapa), encoding="utf-8")
+    execucoes = None
+    if fonte == "banco":
+        try:
+            execucoes = carregar_execucoes_banco(dias)
+            fonte_usada = f"banco RPA.TIMER (últimos {dias} dias)"
+        except Exception as erro:
+            logger.warning("Mapa de calor: banco indisponível (%s); usando os JSONs locais", erro)
+    if execucoes is None:
+        execucoes = carregar_execucoes(pasta_logs)
+        fonte_usada = "arquivos locais (tempos_rotinas_*.json)"
+    destino.write_text(gerar_html(calcular_mapa(execucoes, fonte_usada)), encoding="utf-8")
     return destino
 
 
 if __name__ == "__main__":
-    pasta = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent / "log_playwright"
-    print(f"Mapa de calor gerado em: {gerar_mapa_calor(pasta)}")
+    parser = argparse.ArgumentParser(description="Gera o mapa de calor dos tempos das rotinas")
+    parser.add_argument("pasta", nargs="?", default=str(Path(__file__).resolve().parent / "log_playwright"),
+                        help="pasta log_playwright (destino do HTML e dos JSONs)")
+    parser.add_argument("--fonte", choices=["banco", "arquivos"], default="banco")
+    parser.add_argument("--dias", type=int, default=60, help="período lido do banco")
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
+    print(f"Mapa de calor gerado em: {gerar_mapa_calor(Path(args.pasta), fonte=args.fonte, dias=args.dias)}")

@@ -165,12 +165,12 @@ Rotina 2: ...                                             -> tempo "Rotina 2"
 
 ### Mapa de calor dos tempos
 
-Ao final de cada execucao e gerado `log_playwright/mapa_calor.html` (abre direto no navegador, sem internet), lendo todos os `tempos_rotinas_*.json`:
+Ao final de cada execucao e gerado `log_playwright/mapa_calor.html` (abre direto no navegador, sem internet). Os dados vem do **`RPA.TIMER`** (linhas `Tempo Login: Ns` e `Tempo Rotina '<nome>': Ns (com erro: ...)`, ultimos `MapaCalorDias` dias, padrao 60), juntando execucoes de qualquer maquina; se o banco estiver indisponivel, usa os `tempos_rotinas_*.json` locais:
 
 - linhas = Login + rotinas; colunas = execucoes (mais recente a direita); celula = tempo;
 - **normal** = mediana das ultimas 10 execucoes sem erro da mesma rotina; cores com icone: ✓ normal (ate +15%), ▲ atencao (+15% a +30%), ▲▲ lenta (> +30%, mesmo limite do e-mail), ✕ erro, – nao executada;
 - filtros de periodo, nome e "so rotinas com problema", valor em segundos ou % vs normal, visao em tabela, tooltip com detalhes/erro e opcao "Atualizar sozinho" (recarrega a cada 5 min);
-- limites ajustaveis no topo de `mapa_calor.py`; para regerar manualmente: `python mapa_calor.py [pasta_log_playwright]`.
+- limites ajustaveis no topo de `mapa_calor.py`; para regerar manualmente: `python mapa_calor.py log_playwright [--dias 90] [--fonte arquivos]`.
 
 Testes do parser de rotinas: `python -m unittest discover -s tests -v`
 

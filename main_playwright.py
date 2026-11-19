@@ -1,34 +1,4 @@
-"""
-main_playwright.py - Cronômetro de rotinas do Protheus (Playwright + TOTVS WebAgent).
 
-LÓGICA GERAL
-------------
-1. Lê as rotinas (uma ou mais) de --fluxo ou de "Rotinas"/"Fluxo" no config.json
-   (ver rotinas.py). Trocar rotinas não exige alterar código.
-2. LOGIN ÚNICO: abre o navegador, acessa a URL, faz login, MFA e empresa/filial
-   uma única vez. Esse trecho é cronometrado como "Login".
-3. Para cada rotina, na mesma sessão:
-   a) executa o caminho (menu > rotina > ações) - cronometrado individualmente.
-      O menu é percorrido LENDO A ÁRVORE do WebApp (wa-menu / wa-menu-item, que é
-      aninhada): cada item é procurado só dentro do item pai (evita confundir
-      "Compras > Movimento" com "Fiscal > Movimento") e pastas já abertas não são
-      clicadas (clicar fecharia). O menu é um acordeão: abrir um módulo fecha o outro;
-   b) volta para a tela principal (fora do tempo medido): fecha a tela da rotina
-      e confirma que o menu (1ª etapa do caminho) está visível de novo.
-4. Os tempos (Login, Rotina 1, Rotina 2, ...) vão para:
-   - o log geral (resumo no final) e um log de cada item em log_playwright/rotinas/;
-   - a tabela RPA.TIMER (linhas "Tempo Login: Ns", "Tempo Rotina 'X': Ns");
-   - log_playwright/tempos_rotinas_<id>.json;
-   - log_playwright/mapa_calor.html (mapa de calor de todas as execuções, ver mapa_calor.py).
-5. Falhas:
-   - no login: novas tentativas da execução inteira (ExecutionRetries) e e-mail;
-   - em uma rotina: e-mail de erro, a rotina fica marcada com erro e a próxima segue;
-     se não for possível voltar à tela principal, as rotinas restantes são marcadas
-     como não executadas.
-6. Erro conhecido "Excedeu numero de licenças" (janela TOTVS): reconhecido na tela,
-   vira LicencaExcedidaError (erros_protheus.py), tem descrição e e-mail próprios e
-   NÃO entra nas novas tentativas.
-"""
 import argparse
 import json
 import os
@@ -817,10 +787,12 @@ class ProtheusPlaywrightMainFlow:
             # Sem a tela principal não há como abrir a próxima rotina pelo menu.
             if not tela_principal_ok:
                 logger.error("Rotina '%s' não executada: tela principal não foi recuperada", rotina.nome)
-                resultados.append(ResultadoRotina(
+                nao_executada = ResultadoRotina(
                     rotina.nome, rotina.caminho, 0.0, False,
                     "NAO EXECUTADA: tela principal não foi recuperada após a rotina anterior",
-                ))
+                )
+                resultados.append(nao_executada)
+                cronometro.registrar_tempo(f"Rotina '{rotina.nome}'", 0.0, False, nao_executada.erro)
                 continue
 
             handler = logging_config.iniciar_log_da_rotina(indice, LogBanco.id_execucao, rotina.nome)
@@ -839,7 +811,9 @@ class ProtheusPlaywrightMainFlow:
 
                 logger.info("Tempo da rotina '%s': %.1fs (%s)", rotina.nome, resultado.segundos,
                             "OK" if resultado.sucesso else resultado.erro)
-                cronometro.registrar_tempo(f"Rotina '{rotina.nome}'", resultado.segundos, resultado.sucesso)
+                cronometro.registrar_tempo(
+                    f"Rotina '{rotina.nome}'", resultado.segundos, resultado.sucesso, resultado.erro
+                )
                 resultados.append(resultado)
 
                 # Volta para a tela principal (fora do tempo medido).
@@ -1363,6 +1337,7 @@ def exec_playwright_from_main(
 
             browser: Browser | None = None
             flow: ProtheusPlaywrightMainFlow | None = None
+            inicio_login: float | None = None
             try:
                 cronometro.atualizar_acao("Abrindo navegador")
                 browser = browser_type.launch(
@@ -1471,6 +1446,14 @@ def exec_playwright_from_main(
                         == "Iframe de login encontrado; preenchendo usuário"
                     )
                     descricao_final = f"ERRO DURANTE EXECUCAO PLAYWRIGHT: {erro_resumido}"
+                # Falhou durante o login: registra o tempo do login com erro (vai para o mapa de calor).
+                if inicio_login is not None and not resultados:
+                    segundos_login = monotonic() - inicio_login
+                    resultados.append(ResultadoRotina(
+                        "Login", "URL > parâmetros > login > MFA > empresa/filial",
+                        round(segundos_login, 2), False, descricao_final[:300],
+                    ))
+                    cronometro.registrar_tempo("Login", segundos_login, False, descricao_final)
                 logger.exception("Exceção não tratada capturada na execução do fluxo principal: %s", e)
                 cronometro.marcar_erro()
                 cronometro.atualizar_acao(
@@ -1506,7 +1489,9 @@ def exec_playwright_from_main(
                     logger.info("Relatório de tempos salvo em %s", relatorio)
                     # Atualiza o mapa de calor com esta execução. Falha aqui não afeta o cronômetro.
                     try:
-                        mapa = mapa_calor.gerar_mapa_calor(LogBanco.LOG_DIR)
+                        mapa = mapa_calor.gerar_mapa_calor(
+                            LogBanco.LOG_DIR, dias=int(CONFIG.get("MapaCalorDias", 60))
+                        )
                         logger.info("Mapa de calor atualizado em %s", mapa)
                     except Exception:
                         logger.exception("Não foi possível gerar o mapa de calor")
@@ -1561,3 +1546,35 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical("Ocorreu um erro fatal que interrompeu o script: %s", e, exc_info=True)
         sys.exit(1)
+
+"""
+main_playwright.py - Cronômetro de rotinas do Protheus (Playwright + TOTVS WebAgent).
+
+LÓGICA GERAL
+------------
+1. Lê as rotinas (uma ou mais) de --fluxo ou de "Rotinas"/"Fluxo" no config.json
+   (ver rotinas.py). Trocar rotinas não exige alterar código.
+2. LOGIN ÚNICO: abre o navegador, acessa a URL, faz login, MFA e empresa/filial
+   uma única vez. Esse trecho é cronometrado como "Login".
+3. Para cada rotina, na mesma sessão:
+   a) executa o caminho (menu > rotina > ações) - cronometrado individualmente.
+      O menu é percorrido LENDO A ÁRVORE do WebApp (wa-menu / wa-menu-item, que é
+      aninhada): cada item é procurado só dentro do item pai (evita confundir
+      "Compras > Movimento" com "Fiscal > Movimento") e pastas já abertas não são
+      clicadas (clicar fecharia). O menu é um acordeão: abrir um módulo fecha o outro;
+   b) volta para a tela principal (fora do tempo medido): fecha a tela da rotina
+      e confirma que o menu (1ª etapa do caminho) está visível de novo.
+4. Os tempos (Login, Rotina 1, Rotina 2, ...) vão para:
+   - o log geral (resumo no final) e um log de cada item em log_playwright/rotinas/;
+   - a tabela RPA.TIMER (linhas "Tempo Login: Ns", "Tempo Rotina 'X': Ns");
+   - log_playwright/tempos_rotinas_<id>.json;
+   - log_playwright/mapa_calor.html (mapa de calor lido do RPA.TIMER, ver mapa_calor.py).
+5. Falhas:
+   - no login: novas tentativas da execução inteira (ExecutionRetries) e e-mail;
+   - em uma rotina: e-mail de erro, a rotina fica marcada com erro e a próxima segue;
+     se não for possível voltar à tela principal, as rotinas restantes são marcadas
+     como não executadas.
+6. Erro conhecido "Excedeu numero de licenças" (janela TOTVS): reconhecido na tela,
+   vira LicencaExcedidaError (erros_protheus.py), tem descrição e e-mail próprios e
+   NÃO entra nas novas tentativas.
+"""

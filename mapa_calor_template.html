@@ -377,7 +377,7 @@ if (!DADOS) {
   throw new Error("Modelo sem dados: abra log_playwright/mapa_calor.html");
 }
 const g = fmtData(DADOS.gerado_em);
-$("sub").textContent = `${DADOS.colunas.length} execuções · ${DADOS.rotinas.length} itens (login + rotinas) · atualizado em ${g.completa}`;
+$("sub").textContent = `${DADOS.colunas.length} execuções · ${DADOS.rotinas.length} itens (login + rotinas) · fonte: ${DADOS.fonte || "-"} · atualizado em ${g.completa}`;
 $("nota").textContent = `"Normal" = mediana das últimas ${DADOS.parametros.janela} execuções sem erro da mesma rotina, anteriores a cada célula. ` +
   `Passe o mouse (ou use Tab) nas células para ver detalhes.`;
 desenharResumo(); desenharLegenda(); ligarFiltros(); desenhar(); agendarAtualizacao();
