@@ -4,6 +4,11 @@ Robô em Python + Playwright que **entra no Protheus pelo navegador (WebApp), ab
 
 Trocar ou incluir rotinas **não exige mexer no código**: basta editar o `config.json`.
 
+O projeto tem duas partes:
+
+- **o robô** (`main_playwright.py`), que roda de hora em hora, cronometra o login e cada rotina e grava tudo no banco;
+- **o mapa de calor** (`api_mapa.py`), um serviço web que lê o banco e mostra o histórico de tempos, quais rotinas estão lentas ou com erro e, clicando numa execução, onde o tempo foi gasto.
+
 ---
 
 ## Sumário
@@ -13,11 +18,12 @@ Trocar ou incluir rotinas **não exige mexer no código**: basta editar o `confi
 3. [Pré-requisitos](#3-pré-requisitos)
 4. [Configuração](#4-configuração) — `config.json`, rotinas e `.env`
 5. [Como executar](#5-como-executar) — Windows, Docker e Airflow
-6. [Onde ver os resultados](#6-onde-ver-os-resultados)
-7. [Erros e alertas](#7-erros-e-alertas)
-8. [Testes](#8-testes)
-9. [Diagnóstico rápido](#9-diagnóstico-rápido)
-10. [Segurança](#10-segurança)
+6. [Onde ver os resultados](#6-onde-ver-os-resultados) — logs, prints e o que vai para o banco
+7. [Mapa de calor](#7-mapa-de-calor) — como ler, histórico, detalhe e o serviço web
+8. [Erros e alertas](#8-erros-e-alertas)
+9. [Testes](#9-testes)
+10. [Diagnóstico rápido](#10-diagnóstico-rápido)
+11. [Segurança](#11-segurança)
 
 ---
 
@@ -297,78 +303,129 @@ No Windows (PowerShell), troque os caminhos dos volumes, por exemplo `-v "C:\scr
 
 | Onde | O que tem |
 |---|---|
-| **Mapa de calor (serviço)** — `http://<servidor>:8010` | Visão principal, sempre atualizada pelo banco e com o **passo a passo de cada execução**. Ver [6.1](#61-serviço-do-mapa-de-calor-fastapi). |
-| Mapa de calor (arquivo) — `log_playwright/mapa_calor.html` | Mesma visão, sem servidor: Linhas = Login e rotinas; colunas = execuções; cor = normal / atenção / lenta / erro. Filtros, detalhes ao passar o mouse e visão em tabela. Regerado ao fim de cada execução. |
+| **Mapa de calor (serviço)** — `http://<servidor>:8010` | Visão principal: histórico completo lido do banco e **passo a passo de cada execução**. Ver [seção 7](#7-mapa-de-calor). |
+| Mapa de calor (arquivo) — `log_playwright/mapa_calor.html` | A mesma grade, sem servidor (regerada ao fim de cada execução). |
 | Log geral — `log_playwright/<data>_protheus_timer.log` | Toda a execução, com o **resumo dos tempos** no final. |
 | Log por item — `log_playwright/rotinas/` | Um arquivo para o login (`r00`) e um por rotina (`r01`, `r02`...). |
 | Prints — `log_playwright/*.png` | `fluxo_rNN_EE_<etapa>.png` a cada clique; `timeout_*.png` quando algo não aparece (tirado antes de qualquer Esc). |
-| JSON — `log_playwright/tempos_rotinas_<id>.json` | Tempos da execução (fallback do mapa se o banco cair). |
-| Banco — `RPA.TIMER` | Tudo, com o mesmo `ID_EXECUCAO` por execução (ver abaixo). |
+| JSON — `log_playwright/tempos_rotinas_<id>.json` | Tempos da execução (usado pelo mapa se o banco cair). |
+| Banco — `RPA.TIMER` | Tudo, com o mesmo `ID_EXECUCAO` em todas as linhas de uma execução (ver abaixo). |
 
-**Mapa de calor — como ler:** o "normal" de cada rotina é a **mediana das últimas 10 execuções sem erro**. ✓ normal (até +15%), ▲ atenção (+15% a +30%), ▲▲ lenta (mais de +30%, mesmo limite do e-mail), ✕ erro, – não executada. Os limites ficam no topo de `mapa_calor.py`. **Abra o arquivo de `log_playwright/`** — o `mapa_calor_template.html` da raiz é só o modelo.
+### 6.1 O que o robô grava no `RPA.TIMER`
 
-**O que vai para o `RPA.TIMER`** (colunas `ID_EXECUCAO, DESCRICAO, SISTEMA, USUARIO, ERRO, TEMPO_EXECUCAO, HORARIO_EXECUCAO`):
+Colunas: `ID_EXECUCAO, DESCRICAO, SISTEMA, USUARIO, ERRO, TEMPO_EXECUCAO, HORARIO_EXECUCAO` (`SISTEMA = 'PROTHEUS'`).
 
-| Quando | `DESCRICAO` (exemplo) | `TEMPO_EXECUCAO` |
-|---|---|---|
-| Início | `[0000s] - Início do cronômetro Playwright` | 0 |
-| A cada segundo | `[0042s] - <o que o robô está fazendo>` | 1 |
-| Fim de cada item | `[0278s] - Tempo Login: 70.9s` / `[0345s] - Tempo Rotina 'Pedidos de Compra': 12.3s (com erro: <motivo>)` | segundos do item |
-| Fim | `[0400s] - Finalizando execução` ou `ERRO EM ROTINA(S): ...` | tempo total |
-| Após o fim | uma linha por linha do log geral | 1 |
+| Quando | `DESCRICAO` (exemplo) | `ERRO` | `TEMPO_EXECUCAO` |
+|---|---|---|---|
+| Início | `[0000s] - Início do cronômetro Playwright` | `NAO` | 0 |
+| **A cada segundo** (cronômetro) | `[0042s] - Rotina 1/2 - Etapa 4/6: procurando 'Visualizar'` | `NAO` | 1 |
+| Fim de cada item | `[0278s] - Tempo Login: 70.9s` | `NAO` | segundos do item |
+| | `[0345s] - Tempo Rotina 'Pedidos de Compra': 64.5s (com erro: <motivo>)` | `ERRO` | segundos do item |
+| Fim da execução | `[0400s] - Finalizando execução` ou `ERRO EM ROTINA(S): ...` | `NAO` / `SIM` | **tempo total** |
+| Depois do fim (`LogBanco.salvar`) | uma linha para cada linha do log geral | `NAO` / `WARN` / `ERRO` | 1 |
 
 Consultas úteis:
 
 ```sql
--- Tempo de cada rotina, mais recentes primeiro
+-- Tempo de cada item (Login e rotinas), mais recentes primeiro
 SELECT ID_EXECUCAO, HORARIO_EXECUCAO, ERRO, TEMPO_EXECUCAO, DESCRICAO
   FROM RPA.TIMER
  WHERE SISTEMA = 'PROTHEUS'
    AND DESCRICAO LIKE '%- Tempo %'
  ORDER BY HORARIO_EXECUCAO DESC;
 
--- Passo a passo de uma execução
+-- Passo a passo de uma execução (filtre também pelo horário: o mesmo ID pode se repetir, ver 7.4)
 SELECT HORARIO_EXECUCAO, ERRO, DESCRICAO
   FROM RPA.TIMER
  WHERE ID_EXECUCAO = :id
+   AND HORARIO_EXECUCAO BETWEEN :inicio AND :inicio + INTERVAL '2' HOUR
  ORDER BY HORARIO_EXECUCAO;
 ```
 
-### 6.1 Serviço do mapa de calor (FastAPI)
+---
 
-`api_mapa.py` é um serviço web que **lê o `RPA.TIMER` no momento do acesso** — junta as execuções de todas as máquinas e não depende do robô gerar arquivo.
+## 7. Mapa de calor
 
-**Histórico completo.** O mapa mostra todas as versões do robô que gravaram no banco:
+O mapa de calor responde, de relance: **quanto tempo cada rotina levou em cada execução, e se isso foi normal, lento ou deu erro**.
 
-| Período | Versão | O que aparece no mapa |
+### 7.1 Como os dados chegam até a tela
+
+```text
+ main_playwright.py ──grava──▶ RPA.TIMER ──lê──▶ mapa_calor.py ──▶ api_mapa.py ──▶ navegador
+   (robô, a cada               (Oracle)          (regras: normal,    (FastAPI,       (página do
+    execução)                                     status, histórico,   cache 30 s)     mapa)
+                                                  passo a passo)
+```
+
+- **`mapa_calor.py`** tem toda a regra: lê o banco, monta a grade, calcula o "normal" e classifica cada célula, monta o passo a passo de uma execução.
+- **`api_mapa.py`** só entrega isso pela web (página + API JSON).
+- **`mapa_calor_template.html`** é a página; ela funciona de dois jeitos:
+  - **serviço** (recomendado): servida pelo `api_mapa.py`, busca os dados na API a cada carga;
+  - **arquivo**: `log_playwright/mapa_calor.html`, com os dados embutidos, gerado pelo robô no fim de cada execução (abre offline). O `mapa_calor_template.html` da raiz é só o modelo — não abra direto.
+
+### 7.2 Como ler a grade
+
+- **Linhas**: `Execução completa` (tempo total), `Login` e cada rotina.
+- **Colunas**: cada execução, da mais antiga (esquerda) para a mais recente (direita).
+- **Célula**: o tempo daquele item naquela execução, com cor **e** ícone:
+
+| Ícone | Status | Quando |
 |---|---|---|
-| até 10/09/2026 | Robô TIR (Selenium) | Só **Execução completa** (tempo total) |
-| 11/09 a 17/11/2026 | Playwright antigo | Execução completa + **Login e rotina estimados** (`~`), separados pelo registro "Acessando menu lateral" |
-| desde 18/11/2026 | Versão atual | Execução completa + Login e cada rotina **exatos** (linhas `Tempo ...`) |
+| ✓ | Normal | até **+15%** do normal da rotina |
+| ▲ | Atenção | de +15% a **+30%** |
+| ▲▲ | Lenta | acima de +30% (mesmo limite do e-mail de lentidão) |
+| ✕ | Erro | o item falhou |
+| – | Não executada | a rotina não rodou (ex.: não deu para voltar à tela principal) |
+| · | Sem histórico | menos de 3 execuções anteriores para comparar |
+| `~` antes do valor | Estimado | execução de uma versão antiga do robô (ver 7.3) |
 
-- A linha **Execução completa** é o tempo total de cada execução e existe em todas as versões — é a série histórica mais longa.
-- Valores com **`~`** são estimados: na versão antiga, a "rotina" inclui também o fechamento da tela. Rotinas antigas caem na mesma linha da rotina atual de mesmo nome (ex.: `Pedidos de Compra`).
-- Cada execução é identificada por **ID + sessão**: o servidor e o PC de teste têm contadores de `ID_EXECUCAO` separados e o mesmo número aparece em execuções diferentes. Mais de 30 minutos sem registros com o mesmo ID = outra execução (`INTERVALO_NOVA_EXECUCAO_MIN` em `mapa_calor.py`).
-- No passo a passo, a duração de cada passo vai do seu primeiro ao último registro por segundo (um buraco nos dados nunca vira duração).
-- O histórico é resumido **dentro do Oracle** (uma linha por execução), então períodos longos (até 2 anos) não trazem milhares de registros para o serviço.
+**O "normal"** de cada célula é a **mediana das 10 execuções anteriores sem erro daquela mesma rotina**. A mediana não se deixa levar por um dia atípico (a média se deixaria), e só execuções *anteriores* entram — assim cada célula é comparada com o que era normal **naquele momento**. Se uma rotina fica lenta por vários dias seguidos, o novo tempo passa a ser o normal depois de umas 6 execuções (mais da metade da janela de 10).
 
-| Endereço | O que entrega |
-|---|---|
-| `/` | A página do mapa de calor |
-| `/api/mapa?dias=60` | A grade (Login/rotinas × execuções) já classificada |
-| `/api/execucoes/{id}?inicio=AAAA-MM-DDTHH:MM:SS` | O detalhe completo da execução que começou nesse horário |
-| `/health` | `{"status": "ok"}` — para monitoramento |
-| `/docs` | Documentação interativa da API (Swagger) |
+Os limites (`LIMITE_ATENCAO`, `LIMITE_LENTA`, `JANELA_NORMAL`, `MINIMO_HISTORICO`) ficam no topo de `mapa_calor.py`.
 
-**Clique numa célula** para abrir o painel da execução:
+**Na página:** cartões com o resumo da última execução; filtros de **Histórico** (7 dias a 2 anos, lido do banco), **Período** (últimas N execuções), nome da rotina e "só rotinas com problema"; valor em segundos ou em % do normal; visão em tabela; **Atualizar sozinho** (busca o banco de novo a cada minuto, sem recarregar).
 
-- **tempos** do Login e de todas as rotinas daquela execução;
-- **passo a passo** da rotina escolhida — o que o robô estava fazendo e por quantos segundos (ex.: `procurando 'Visualizar'` — 22 s, com o passo mais demorado em destaque). Vem dos registros que o cronômetro grava a cada segundo, por isso mostra **onde** a lentidão aconteceu;
-- **avisos e erros** do log daquela execução (ex.: clique repetido, timeout).
+### 7.3 Histórico: todas as versões do robô
 
-Na página também há o seletor **Histórico** (7 dias a 2 anos) e **Atualizar sozinho** (busca o banco de novo a cada minuto, sem recarregar).
+O robô já gravou no `RPA.TIMER` em formatos diferentes. O mapa entende todos:
 
-**Rodar no Windows:**
+| Período | Versão | O que existe no banco | O que aparece no mapa |
+|---|---|---|---|
+| até 10/09/2026 | Robô TIR (Selenium) | `INICIANDO/FINALIZANDO PROTHEUS_TIR` com o tempo total | Só **Execução completa** |
+| 11/09 a 17/11/2026 | Playwright antigo | registros por segundo + linha final com o total | Execução completa + **Login e rotina estimados** (`~`) |
+| desde 18/11/2026 | Versão atual | + linhas `Tempo Login` / `Tempo Rotina` | Execução completa + Login e cada rotina **exatos** |
+
+- **Execução completa** vem da linha de encerramento (o maior `TEMPO_EXECUCAO` da execução) e existe em todas as versões: é a série histórica mais longa.
+- **Estimativa do Playwright antigo:** o Login vai do início até o registro `Acessando menu lateral: ...`; a rotina vai daí até o fim (por isso inclui também o fechamento da tela — pode ficar alguns segundos acima da medição atual). O nome vem do caminho (`... > Pedidos de Compra`), então o histórico antigo cai **na mesma linha** da rotina atual de mesmo nome.
+- O histórico é **resumido dentro do Oracle** (`SQL_RESUMO_EXECUCOES`: uma linha por execução). Mesmo com 2 anos, o serviço não puxa os milhares de registros por segundo.
+
+### 7.4 Como uma execução é identificada (ID + sessão)
+
+O `ID_EXECUCAO` vem de um contador local (`idExec.json`). **O servidor e o PC de teste têm contadores separados**, então o mesmo número aparece em execuções diferentes (ex.: o mesmo número usado em setembro pelo servidor e hoje pelo PC).
+
+Por isso o mapa identifica uma execução por **ID + sessão**: linhas com o mesmo ID separadas por **mais de 30 minutos sem registros** são de execuções diferentes (`INTERVALO_NOVA_EXECUCAO_MIN` em `mapa_calor.py`). Isso vale para a grade (o SQL usa `LAG` para detectar o intervalo) e para o detalhe, que é buscado pelo **ID + horário de início** da coluna.
+
+### 7.5 Detalhe de uma execução (clique numa célula — modo serviço)
+
+O painel mostra:
+
+1. **Tempos** de todos os itens daquela execução (clique num deles para trocar o passo a passo).
+2. **Passo a passo** do item escolhido — *onde o tempo foi gasto*:
+
+   ```text
+   08:30:29  Rotina 1/2 - Etapa 3/6: procurando 'Pedidos de Compra' no menu   ▇▇          5s
+   08:30:34  Rotina 1/2 - Etapa 4/6: procurando 'Visualizar'                  ▇▇▇▇▇▇▇▇▇  22s  ← mais demorado
+   08:30:56  Rotina 1/2 - Etapa 5/6: procurando 'Cancelar'                    ▇            3s
+   ```
+
+   Ele é montado com os registros que o cronômetro grava **a cada segundo** (`ERRO = 'NAO'`, `TEMPO_EXECUCAO = 1`): segundos seguidos com o mesmo texto viram um passo, e a duração do passo vai do **primeiro ao último registro dele** (um buraco nos dados nunca vira duração). Uma linha de log que cai no meio de um passo que continua é juntada a ele.
+3. **Avisos e erros** do log daquela execução (`ERRO = 'WARN'`/`'ERRO'`), ex.: clique repetido, timeout.
+
+Em execuções do TIR não há registros por segundo, então só aparecem os tempos.
+
+### 7.6 Subir o serviço
+
+**No Windows (para testar):**
 
 ```powershell
 pip install -r requirements-mapa.txt
@@ -376,7 +433,9 @@ python api_mapa.py                 # http://localhost:8010
 # ou: uvicorn api_mapa:app --host 0.0.0.0 --port 8010
 ```
 
-**Rodar no servidor (Docker, sempre no ar):**
+O serviço não recarrega o código sozinho: depois de atualizar os arquivos, pare (Ctrl+C) e rode de novo.
+
+**No servidor (Docker, sempre no ar)** — imagem leve e separada da do robô (só Python, FastAPI e `oracledb`):
 
 ```bash
 docker build -f Dockerfile.mapa -t hiannyurt/protheus-timer-mapa:latest .
@@ -386,14 +445,24 @@ docker run -d --name mapa-protheus --restart unless-stopped -p 8010:8010 \
   hiannyurt/protheus-timer-mapa:latest
 ```
 
-- Usa só `usernamedb`, `passworddb` e `dsn` do `.env` (somente leitura no `RPA.TIMER`). O driver roda no modo *thin* (sem Oracle Instant Client).
-- Variáveis opcionais: `MAPA_PORTA` (8010), `MAPA_HOST` (0.0.0.0), `MAPA_CACHE_SEGUNDOS` (30 — evita consultar o Oracle a cada tela aberta).
+| Endereço | O que entrega |
+|---|---|
+| `/` | A página do mapa de calor |
+| `/api/mapa?dias=60` | A grade já classificada (JSON) |
+| `/api/execucoes/{id}?inicio=AAAA-MM-DDTHH:MM:SS` | O detalhe da execução que começou nesse horário (JSON) |
+| `/health` | `{"status": "ok"}` — para monitoramento (o Docker usa no healthcheck) |
+| `/docs` | Documentação interativa da API (Swagger) |
+
+- Usa só `usernamedb`, `passworddb` e `dsn` do `.env`, e só **lê** o `RPA.TIMER`. O `oracledb` roda no modo *thin* (sem Oracle Instant Client; exige Oracle 12.1+).
+- Variáveis opcionais: `MAPA_PORTA` (8010), `MAPA_HOST` (0.0.0.0), `MAPA_CACHE_SEGUNDOS` (30 — várias telas abertas não consultam o Oracle a cada segundo).
 - Banco fora do ar → a página mostra o aviso e a API responde `503` com o motivo.
-- O serviço **não tem login**: publique só na rede interna (ou atrás de um proxy com autenticação).
+- O serviço **não tem login**: deixe a porta só na rede interna (ou atrás de um proxy com autenticação).
+
+**Arquivo sem servidor:** `python mapa_calor.py log_playwright [--dias 90] [--fonte arquivos]` gera o `log_playwright/mapa_calor.html` (o robô já faz isso no fim de cada execução; `--fonte arquivos` usa só os JSONs locais).
 
 ---
 
-## 7. Erros e alertas
+## 8. Erros e alertas
 
 | Situação | O que o robô faz | Alerta |
 |---|---|---|
@@ -409,7 +478,7 @@ Os destinatários de cada e-mail estão em `MandaEmail.py`.
 
 ---
 
-## 8. Testes
+## 9. Testes
 
 Os testes não precisam de Protheus, Oracle nem navegador:
 
@@ -429,7 +498,7 @@ Para testar uma rotina nova de ponta a ponta, rode com `--headed` e `--fluxo` (v
 
 ---
 
-## 9. Diagnóstico rápido
+## 10. Diagnóstico rápido
 
 | Sintoma no log | Causa provável / o que fazer |
 |---|---|
@@ -448,7 +517,7 @@ Para ver também as linhas técnicas (cada `INSERT` no banco, tracebacks complet
 
 ---
 
-## 10. Segurança
+## 11. Segurança
 
 - `config.json` e `.env` têm senhas: **nunca versione nem coloque na imagem**. Eles estão no `.gitignore` e no `.dockerignore`; use os arquivos `*.example` como modelo.
 - Se uma credencial real já foi para o git ou para o Docker Hub, **troque-a**.
