@@ -1,472 +1,391 @@
-# Playwright Timer com TOTVS WebAgent
+# Protheus Timer — cronômetro de rotinas do Protheus
 
-Imagem Docker para executar uma automacao Playwright no Protheus, usando o TOTVS WebAgent, autenticacao com MFA via Microsoft Graph e registro do andamento da execucao em Oracle.
+Robô em Python + Playwright que **entra no Protheus pelo navegador (WebApp), abre as rotinas que você configurar e mede quanto tempo cada uma leva** — do jeito que um usuário faria. Os tempos vão para o banco (`RPA.TIMER`), para os logs e para um **mapa de calor** que mostra quais rotinas estão mais lentas que o normal ou com erro.
 
-O container foi desenhado para executar **uma rotina por inicializacao**. Quando o script termina, o Supervisor encerra o WebAgent e o container tambem termina.
+Trocar ou incluir rotinas **não exige mexer no código**: basta editar o `config.json`.
 
-# COMANDOS PRINCIPAIS 
+---
 
-# Rodar docker no linux
-1. docker run --pull always --rm -it   -e TZ=America/Cuiaba   -v /etc/localtime:/etc/localtime:ro   -v /python_bf/playwright_timer/config.json:/app/config.json:ro   -v /python_bf/playwright_timer/.env:/app/.env:ro   -v /python_bf/playwright_timer/idExec.json:/app/idExec.json   -v /python_bf/playwright_timer/log_playwright:/app/log_playwright   hiannyurt/playwright-webagent:latest
+## Sumário
 
-# Buildar a imagem na maquina 
-2. docker build --no-cache -t hiannyurt/playwright-webagent:latest .
+1. [Como funciona](#1-como-funciona)
+2. [Estrutura do projeto](#2-estrutura-do-projeto)
+3. [Pré-requisitos](#3-pré-requisitos)
+4. [Configuração](#4-configuração) — `config.json`, rotinas e `.env`
+5. [Como executar](#5-como-executar) — Windows, Docker e Airflow
+6. [Onde ver os resultados](#6-onde-ver-os-resultados)
+7. [Erros e alertas](#7-erros-e-alertas)
+8. [Testes](#8-testes)
+9. [Diagnóstico rápido](#9-diagnóstico-rápido)
+10. [Segurança](#10-segurança)
 
-# Publicar imagem
-3. docker push hiannyurt/playwright-webagent:latest
+---
 
-# Importar imagem no servidor 
-4. docker pull hiannyurt/playwright-webagent:latest
+## 1. Como funciona
 
-# ⚠️QUANDO FOR ATUALIZAR O WEBAGENT⚠️
-Quando for atualizar oo webagent coloque os arquivos .deb e .rpm na pasta webagent e faca o docker build da imagem com a nova versao do webagent
+Uma execução faz **um login só** e, na mesma sessão, passa por cada rotina, cronometrando cada uma separadamente:
 
+```text
+┌──────────────────────────────────────────────────────────────────────┐
+│ LOGIN  (cronometrado como "Login")                                   │
+│   abre o navegador → URL do WebApp → parâmetros iniciais (SIGAADV)   │
+│   → usuário/senha → MFA (código lido do e-mail) → empresa/filial     │
+├──────────────────────────────────────────────────────────────────────┤
+│ ROTINA 1  (cronometrada)                                             │
+│   menu: Compras > Movimento > Pedidos de Compra                      │
+│   ações: Visualizar > Cancelar > sair                                │
+│   volta para a tela principal (fora do tempo medido)                 │
+├──────────────────────────────────────────────────────────────────────┤
+│ ROTINA 2 ... ROTINA N  (idem)                                        │
+├──────────────────────────────────────────────────────────────────────┤
+│ FIM: fecha o navegador, grava os tempos no banco, gera o JSON e o    │
+│      mapa de calor, compara com a média e manda alertas se preciso   │
+└──────────────────────────────────────────────────────────────────────┘
+```
 
-## 1. O que a imagem faz
+Detalhes que garantem medições confiáveis:
 
-Ao iniciar, o container:
+- **Menu lido pela estrutura da página.** O menu do WebApp é uma árvore (`wa-menu-item` dentro de `wa-menu-item`). Cada etapa é procurada **só dentro da pasta anterior** — por isso `Compras > Movimento` e `Fiscal > Movimento` nunca se confundem. Pastas já abertas não são clicadas de novo (clicar as fecharia). O menu funciona como acordeão: abrir um módulo fecha o outro.
+- **Todo clique é confirmado.** Pasta → espera os subitens aparecerem. Rotina → espera o menu sumir (a tela da rotina ocupa a página). Ação (ex.: `Visualizar`) → espera a **próxima etapa** aparecer. Se o Protheus ignorou o clique (tela ainda carregando), o robô clica de novo.
+- **Pausa antes de cada ação** (`PausaAntesAcao`, 2 s): com a tela ainda "assentando", o Protheus ignora cliques. A pausa é fixa, então entra igual em todas as medições.
+- **O tempo da rotina mede só o caminho dela** — não inclui o login nem a volta para a tela principal.
 
-1. Sobe o TOTVS WebAgent dentro de uma sessao D-Bus e de um display virtual Xvfb.
-2. Aguarda a porta `21021` do WebAgent ficar disponivel.
-3. Inicia `main_playwright.py`.
-4. Abre a URL do Protheus usando o navegador configurado.
-5. Preenche a rotina e o ambiente iniciais.
-6. Faz login no Protheus.
-7. Procura o codigo MFA recente no Microsoft Graph, quando a tela de MFA aparece.
-8. Preenche a empresa/filial, se `Setup_emp` estiver definido.
-9. Executa a rota configurada no `config.json`, por exemplo:
+---
 
-   `Compras > Movimento > Pedidos de Compra > Visualizar > Miscelanea > Senha > Alterar senha > sair`
-
-10. Localiza e clica em cada etapa da rota na ordem informada. A etapa `sair` usa o botão de fechamento da tela da rotina.
-11. Fecha o navegador, grava o encerramento no banco e encerra o container.
-
-## 2. Pre-requisitos
-
-- Docker Desktop ou Docker Engine com suporte a Linux containers.
-- Acesso de rede a:
-  - URL do Protheus;
-  - Microsoft Graph, se o MFA for usado;
-  - banco Oracle;
-  - servidor SMTP, se os alertas por e-mail forem usados.
-- Um arquivo `config.json` valido.
-- Um arquivo `.env` com os segredos e parametros de ambiente.
-- Permissao no Microsoft Graph para ler a caixa de e-mail usada pelo MFA.
-- O usuario do banco deve ter permissao para inserir e consultar `RPA.TIMER`.
-
-## 3. Estrutura esperada
-
-No host, mantenha pelo menos:
+## 2. Estrutura do projeto
 
 ```text
 playwright_timer/
-|-- config.json
-|-- .env
-|-- Dockerfile
-|-- main_playwright.py
-|-- graph.py
-|-- LogBanco.py
-|-- MandaEmail.py
-|-- logging_config.py
-|-- requirements.txt
-`-- webagent/
-    `-- linux-x64-release.deb
+├── main_playwright.py          # Fluxo principal: login, menu, ações, tempos, tentativas
+├── rotinas.py                  # Lê as rotinas (config.json ou --fluxo) e monta o relatório JSON
+├── erros_protheus.py           # Erros conhecidos do Protheus (ex.: "Excedeu numero de licenças")
+├── LogBanco.py                 # Cronômetro e gravação no Oracle (tabela RPA.TIMER)
+├── graph.py                    # Lê o código MFA no e-mail (Microsoft Graph)
+├── MandaEmail.py               # E-mails de alerta (SMTP)
+├── logging_config.py           # Log geral + um log por rotina
+├── mapa_calor.py               # Gera o mapa de calor (lê o RPA.TIMER)
+├── mapa_calor_template.html    # Modelo visual do mapa de calor (não abrir direto)
+│
+├── config.example.json         # ⇢ MODELO do config.json (copie e preencha)
+├── .env.example                # ⇢ MODELO do .env (copie e preencha)
+├── config.json                 # Sua configuração (NÃO versionado)
+├── .env                        # Seus segredos (NÃO versionado)
+├── idExec.json                 # Contador do ID_EXECUCAO (atualizado a cada execução)
+├── requirements.txt            # Dependências Python
+│
+├── Dockerfile                  # Imagem com Python, Firefox, Xvfb e TOTVS WebAgent
+├── run_docker.py               # Executa o container (usado pelo Airflow)
+├── BF_DockerPlaywright.py      # DAG do Airflow (agendamento)
+├── webagent/                   # Instaladores do TOTVS WebAgent para Linux (.deb/.rpm)
+│
+├── tests/                      # Testes automáticos (sem Protheus/banco)
+└── log_playwright/             # Saídas: logs, prints, JSONs e mapa_calor.html
+    └── rotinas/                #   um log por item (r00 = Login, r01 = rotina 1, ...)
 ```
 
-`config.json` e `.env` sao montados no container por volume. Eles nao precisam ser publicados dentro da imagem.
+Responsabilidade de cada módulo, em uma frase:
 
-## 4. Configuracao do `config.json`
+| Módulo | O que faz |
+|---|---|
+| `main_playwright.py` | Orquestra tudo. A classe `ProtheusPlaywrightMainFlow` sabe "mexer" no Protheus (login, menu, cliques confirmados); `exec_playwright_from_main()` amarra login → rotinas → resultados. |
+| `rotinas.py` | Converte `"Compras > Movimento > ..."` em etapas, valida a configuração e grava `tempos_rotinas_<id>.json`. |
+| `LogBanco.py` | `CronometroExecucao` grava no `RPA.TIMER` o andamento (1 linha/segundo), o tempo de cada item (`Tempo Login`, `Tempo Rotina`) e o fim da execução. |
+| `mapa_calor.py` | Lê as linhas `Tempo ...` do banco, calcula o "normal" de cada rotina e gera `mapa_calor.html`. |
+| `erros_protheus.py` | Reconhece a janela TOTVS de licenças esgotadas e a transforma num erro próprio (sem novas tentativas). |
 
-Crie o arquivo com esta estrutura. Substitua os valores pelos dados do ambiente:
+---
 
-```json
-{
-  "Url": "https://protheus.exemplo.com.br/webapp/",
-  "Browser": "firefox",
-  "Environment": "bf",
-  "Language": "pt-br",
-  "User": "usuario_do_protheus",
-  "Password": "senha_do_protheus",
-  "DebugLog": false,
-  "TimeOut": 30,
-  "Headless": true,
-  "POUILogin": true,
-  "LogFolder": "Log",
-  "LogFile": true,
-  "StartProgram": true,
-  "Fluxo": "Compras > Movimento > Pedidos de Compra > Visualizar > Miscelanea > Senha > Alterar senha > sair"
-}
+## 3. Pré-requisitos
+
+| Item | Para quê |
+|---|---|
+| Python 3.12+ | Rodar o robô fora do Docker |
+| Firefox do Playwright | Navegador usado pelo robô (`python -m playwright install firefox`) |
+| **TOTVS WebAgent** instalado e rodando | O WebApp do Protheus exige o WebAgent na máquina (no Docker ele já vem na imagem) |
+| Acesso de rede ao Protheus, Oracle, Microsoft Graph e SMTP | Login, gravação dos tempos, MFA e alertas |
+| Usuário do Protheus com acesso ao **SIGAADV** e às rotinas configuradas | O robô navega pelo menu desse usuário |
+| Aplicativo no Azure AD com permissão de aplicação **Mail.Read** | Ler o código MFA na caixa de e-mail |
+| Permissão de `INSERT`/`SELECT` em `RPA.TIMER` | Gravar e ler os tempos |
+
+---
+
+## 4. Configuração
+
+Dois arquivos, ambos **fora do git**:
+
+```powershell
+copy config.example.json config.json
+copy .env.example .env
 ```
 
-### Parametros do `config.json`
+### 4.1 `config.json` — comportamento do robô
 
-| Parametro | Tipo | Obrigatorio | Funcao |
-|---|---|---:|---|
-| `Url` | string | Sim | URL de entrada do Protheus. Sem ela o programa encerra na inicializacao. |
-| `Browser` | string | Nao | Navegador Playwright. A imagem instala Firefox. O padrao no codigo e `chromium`, mas use `firefox` nesta imagem. |
-| `Environment` | string | Nao | Ambiente inicial do Protheus. Padrao: `bf`. |
-| `Language` | string | Nao | Mantido no arquivo de configuracao; o fluxo atual nao usa esse valor diretamente. |
-| `User` | string | Sim | Usuario usado no formulario de login do Protheus. |
-| `Password` | string | Sim | Senha usada no formulario de login do Protheus. |
-| `DebugLog` | booleano | Nao | Mantido para compatibilidade; o fluxo atual nao usa esse valor diretamente. |
-| `TimeOut` | inteiro | Nao | Timeout base em segundos. O codigo converte esse valor para milissegundos. Padrao: `30`. |
-| `MenuTimeout` | inteiro | Nao | Timeout total para localizar cada etapa do menu. Padrao: `60000` ms. |
-| `MenuStepTimeout` | inteiro | Nao | Timeout de cada transicao do menu antes de iniciar a recuperacao. Padrao: `15000` ms. |
-| `ParametrosTimeout` | inteiro | Nao | Tempo para localizar os campos de rotina e ambiente na tela inicial. Padrao: `60000` ms. |
-| `ExecutionRetries` | inteiro | Nao | Quantidade de reinicios completos para falhas do Playwright. Padrao: `2`. |
-| `Headless` | booleano | Nao | Define se o navegador abre sem interface. Padrao: `true`. |
-| `POUILogin` | booleano | Nao | Mantido para compatibilidade; nao controla diretamente o fluxo atual. |
-| `LogFolder` | string | Nao | Mantido para compatibilidade; os logs atuais sao gravados em `log_playwright`. |
-| `LogFile` | booleano | Nao | Mantido para compatibilidade; o logging atual sempre cria arquivo e console. |
-| `StartProgram` | booleano | Nao | Mantido para compatibilidade; nao controla diretamente o fluxo atual. |
-| `Fluxo` | string | Sim | Etapas separadas por `>`, localizadas e acionadas na ordem informada. Use `sair` para fechar a tela da rotina. |
+Obrigatórios: `Url`, `User`, `Password` e as rotinas (`Rotinas` ou `Fluxo`). O resto tem padrão.
 
-### Uma ou mais rotinas sem alterar codigo
+**Acesso**
 
-Use a lista `Rotinas` no `config.json` (tem prioridade sobre `Fluxo`, que continua aceito para uma rotina so). Cada item pode ser texto ou objeto com `Nome`:
+| Chave | Padrão | O que faz |
+|---|---|---|
+| `Url` | — | Endereço do WebApp do Protheus. |
+| `Environment` | `bf` | Ambiente do AppServer (usado se `Setup_ambiente` não estiver no `.env`). |
+| `User` / `Password` | — | Usuário e senha do Protheus usados pelo robô. |
+| `Browser` | `chromium` | Use **`firefox`** (é o instalado na imagem Docker e o testado). |
+| `Headless` | `true` | `false` mostra o navegador. Pode ser trocado na linha de comando (`--headed`/`--headless`). |
+
+**Rotinas** — ver [4.2](#42-rotinas--como-descrever-o-caminho)
+
+| Chave | O que faz |
+|---|---|
+| `Rotinas` | Lista de rotinas a cronometrar (formato recomendado). |
+| `Fluxo` | Formato antigo: uma rotina só, em texto. Usado apenas se `Rotinas` não existir. |
+
+**Login** (tempos em ms, exceto `TimeOut`)
+
+| Chave | Padrão | O que faz |
+|---|---|---|
+| `TimeOut` | `30` | Tempo-base **em segundos** (carregar a URL, aparecer a tela de login). |
+| `ParametrosTimeout` | `60000` | Espera dos campos da tela "Parâmetros iniciais". |
+| `EmpresaTimeout` / `EntrarTimeout` | `15000` | Tela de empresa/filial e botão Entrar dela. |
+| `MfaTimeout` | `60000` | Quanto tempo esperar o e-mail com o código MFA desta sessão. |
+
+**Menu**
+
+| Chave | Padrão | O que faz |
+|---|---|---|
+| `MenuTimeout` | `60000` | Espera do 1º item do menu (logo após o login o menu pode demorar). |
+| `MenuStepTimeout` | `15000` | Espera de cada subitem e de uma pasta abrir após o clique. |
+| `MenuRetries` | `2` | Quantas vezes clicar num item do menu que não respondeu. |
+| `RotinaAbrirTimeout` | `60000` | Espera da rotina abrir depois do clique no menu. |
+
+**Ações dentro da rotina** (Visualizar, Cancelar, ...)
+
+| Chave | Padrão | O que faz |
+|---|---|---|
+| `PausaAntesAcao` | `2000` | Pausa entre o botão aparecer e o clique (evita clique ignorado). |
+| `RotinaTimeout` | `90000` | Espera máxima de cada botão de ação aparecer. |
+| `AcaoEfeitoTimeout` | `15000` | Espera da próxima etapa aparecer depois de um clique. |
+| `AcaoRetries` | `2` | Quantas vezes clicar de novo numa ação que não teve efeito. |
+
+**Voltar à tela principal e execução**
+
+| Chave | Padrão | O que faz |
+|---|---|---|
+| `FecharRotinaTimeout` | `10000` | Procura do botão de fechar a rotina (quando o caminho não termina em `sair`). |
+| `VoltarTelaTimeout` | `15000` | Espera do menu reaparecer após fechar a rotina. |
+| `VoltarTelaTentativas` | `3` | Tentativas de voltar à tela principal. Sem tela principal, as rotinas seguintes ficam como "não executadas". |
+| `ExecutionRetries` | `2` | Quantas vezes refazer a execução inteira se o **login** falhar (não vale para licença esgotada). |
+| `MapaCalorDias` | `60` | Período de histórico lido do banco para o mapa de calor. |
+
+> Chaves antigas como `Language`, `DebugLog`, `POUILogin`, `LogFolder`, `LogFile` e `StartProgram` podem continuar no arquivo, mas **não são usadas**.
+
+### 4.2 Rotinas — como descrever o caminho
+
+Cada rotina é um **caminho** com as etapas separadas por `>`, na ordem em que um usuário clicaria:
+
+```text
+ Compras  >  Movimento  >  Pedidos de Compra  >  Visualizar  >  Cancelar  >  sair
+└──────── menu (pastas) ───┘ └─ abre a rotina ─┘ └────── ações na tela da rotina ──────┘
+```
 
 ```json
 "Rotinas": [
-  { "Nome": "Pedidos de Compra", "Fluxo": "Compras > Movimento > Pedidos de Compra > Visualizar > Cancelar > sair" },
-  "Faturamento > Consultas > Notas Fiscais > sair"
+    { "Nome": "Pedidos de Compra",    "Fluxo": "Compras > Movimento > Pedidos de Compra > Visualizar > Cancelar > sair" },
+    { "Nome": "Documento de entrada", "Fluxo": "Fiscal > Movimento > Documento Entrada > Visualizar > Cancelar > sair" },
+    "Faturamento > Consultas > Notas Fiscais > sair"
 ]
 ```
 
-Ou informe pela linha de comando (prioridade maxima; repita `--fluxo` para varias):
+Regras:
 
-```bash
-python main_playwright.py --fluxo "Compras > Movimento > Pedidos de Compra > sair" --fluxo "Faturamento > Consultas > Notas Fiscais > sair"
-# no Docker, sobrescreva o comando ou use o config.json montado por volume
+1. **Use o texto exato do menu, sem o contador.** No menu aparece `Compras (7)` → escreva `Compras`. Maiúsculas/minúsculas e espaços extras não importam.
+2. **Comece pelo módulo da raiz do menu** (`Compras`, `Fiscal`, `Faturamento`...) e desça pasta por pasta até a rotina.
+3. **Depois da rotina, escreva as ações** com o texto do botão (`Visualizar`, `Cancelar`, `Alterar`...). Cada ação só é clicada quando a anterior teve efeito.
+4. **Termine com `sair`** (ou `fechar`) para fechar a tela da rotina. Se não terminar, o robô fecha sozinho, fora do tempo medido.
+5. **`Nome` é opcional**: é como a rotina aparece no log, no banco e no mapa. Sem ele, o próprio caminho vira o nome. **Não troque o nome de uma rotina já em uso** — o histórico (e o "normal" do mapa de calor) é agrupado por nome.
+6. A ordem da lista é a ordem de execução.
+
+Para testar uma rotina sem editar o `config.json`, passe-a na linha de comando (tem prioridade sobre o arquivo; repita `--fluxo` para várias):
+
+```powershell
+python main_playwright.py --headed --fluxo "Compras > Movimento > Pedidos de Compra > Visualizar > Cancelar > sair"
 ```
 
-Fluxo da execucao: **login unico** e depois cada rotina na mesma sessao.
+### 4.3 `.env` — segredos e dados do ambiente
 
-```text
-Login (URL > parametros > login > MFA > empresa/filial)   -> tempo "Login"
-Rotina 1: caminho do menu e acoes                         -> tempo "Rotina 1"
-          volta para a tela principal (fora do tempo)
-Rotina 2: ...                                             -> tempo "Rotina 2"
-```
+| Variável | Obrigatória | O que faz |
+|---|:-:|---|
+| `Setup_rotina` | | Programa inicial do WebApp. Padrão `SIGAADV`. |
+| `Setup_ambiente` | | Ambiente. Padrão: `Environment` do `config.json`. |
+| `Setup_emp` / `Setup_filial` | | Grupo de empresas e filial. **Sem `Setup_emp` a tela de empresa/filial é pulada.** |
+| `GRAPH_TENANT_ID`, `GRAPH_CLIENT_ID`, `GRAPH_CLIENT_SECRET` | ✔ (se houver MFA) | Aplicativo do Azure AD usado para ler o e-mail. |
+| `BOT_USER_EMAIL` | ✔ (se houver MFA) | Caixa que recebe o código MFA do usuário do robô. |
+| `FOLDER_ID` | ✔ (se houver MFA) | Pasta do e-mail: `inbox` ou o ID de uma pasta. |
+| `usernamedb`, `passworddb` | ✔ | Usuário e senha do Oracle. |
+| `dsn` | ✔ | Conexão Oracle: `host:porta/service_name`. |
+| `usuario` | | Valor gravado na coluna `USUARIO` do `RPA.TIMER`. |
+| `server_smtp`, `port`, `sender_mail`, `password` | | E-mails de alerta (porta padrão `587`, STARTTLS). |
 
-| Parametro | Padrao | Funcao |
-|---|---|---|
-| `MfaTimeout` | `60000` | Tempo (ms) aguardando o e-mail do MFA da sessao. |
-| `VoltarTelaTimeout` | `15000` | Tempo (ms) esperando o menu reaparecer depois de fechar a rotina. |
-| `VoltarTelaTentativas` | `3` | Tentativas de fechar a rotina e voltar para a tela principal. |
-| `FecharRotinaTimeout` | `10000` | Tempo (ms) procurando o botao de sair da rotina. |
-| `RotinaAbrirTimeout` | `60000` | Tempo (ms) esperando a rotina abrir depois do clique no menu. |
-| `PausaAntesAcao` | `2000` | Pausa (ms) entre o botao da acao aparecer e o clique; evita clique ignorado com a tela ainda carregando. Entra igual em todas as medicoes. |
-| `AcaoEfeitoTimeout` | `15000` | Tempo (ms) esperando a proxima etapa aparecer depois de clicar numa acao (ex.: Visualizar). |
-| `AcaoRetries` | `2` | Quantas vezes clicar de novo numa acao que nao teve efeito (o botao continua na tela e a proxima etapa nao apareceu). |
+O código MFA só é aceito se o e-mail chegou **depois** do clique em "Entrar" da sessão atual — assim o robô nunca usa um código antigo.
 
-- **Tempos**: log final (`Resumo dos tempos por rotina`, comecando pelo Login), `RPA.TIMER` (linhas `Tempo Login: Ns` e `Tempo Rotina '<nome>': Ns`, com `TEMPO_EXECUCAO` = segundos do item, todas com o mesmo `ID_EXECUCAO`) e `log_playwright/tempos_rotinas_<id>.json`.
-- **Tela principal**: depois de cada rotina o robo clica em sair (se o caminho nao terminou em `sair`) e confirma que a 1a etapa do caminho (o modulo, ex.: `Compras`) esta visivel no menu.
-- **Menu**: as etapas do menu sao percorridas lendo a arvore do WebApp (`wa-menu`/`wa-menu-item`, aninhada). Cada item e procurado so dentro do item pai (sem confundir `Compras > Movimento` com `Fiscal > Movimento`), pastas ja abertas nao sao clicadas e, como o menu e um acordeao, abrir um modulo fecha o anterior. Quando o item clicado nao e pasta, a rotina abriu e as etapas seguintes (`Visualizar`, `Cancelar`, `sair`...) sao procuradas na tela da rotina.
-- **Logs**: `log_playwright/*.log` tem tudo (e e o que vai para o banco); `log_playwright/rotinas/` tem um arquivo para o login (`r00`) e um para cada rotina.
-- **Falhas**: no login, a execucao inteira e repetida (`ExecutionRetries`); em uma rotina, ela fica com erro (e-mail enviado) e a proxima segue. Se nao der para voltar a tela principal, as rotinas restantes ficam como `NAO EXECUTADA`.
-- O codigo MFA so e aceito se o e-mail chegou depois do clique em "Entrar" da sessao atual.
-- Janela TOTVS **"Excedeu numero de licencas"**: reconhecida na tela (inclusive enquanto o robo espera um elemento), gravada como `ERRO LICENCA PROTHEUS` no `RPA.TIMER`, gera e-mail proprio e **nao** entra nas novas tentativas.
+---
 
-### Mapa de calor dos tempos
+## 5. Como executar
 
-Ao final de cada execucao e gerado `log_playwright/mapa_calor.html` (abre direto no navegador, sem internet). Os dados vem do **`RPA.TIMER`** (linhas `Tempo Login: Ns` e `Tempo Rotina '<nome>': Ns (com erro: ...)`, ultimos `MapaCalorDias` dias, padrao 60), juntando execucoes de qualquer maquina; se o banco estiver indisponivel, usa os `tempos_rotinas_*.json` locais:
-
-- linhas = Login + rotinas; colunas = execucoes (mais recente a direita); celula = tempo;
-- **normal** = mediana das ultimas 10 execucoes sem erro da mesma rotina; cores com icone: ✓ normal (ate +15%), ▲ atencao (+15% a +30%), ▲▲ lenta (> +30%, mesmo limite do e-mail), ✕ erro, – nao executada;
-- filtros de periodo, nome e "so rotinas com problema", valor em segundos ou % vs normal, visao em tabela, tooltip com detalhes/erro e opcao "Atualizar sozinho" (recarrega a cada 5 min);
-- limites ajustaveis no topo de `mapa_calor.py`; para regerar manualmente: `python mapa_calor.py log_playwright [--dias 90] [--fonte arquivos]`.
-
-Testes do parser de rotinas: `python -m unittest discover -s tests -v`
-
-O codigo aceita valores booleanos reais no JSON, por exemplo `true` e `false`. Para `Headless`, tambem sao reconhecidos textos como `true`, `false`, `1`, `0`, `yes` e `no`.
-
-## 5. Variaveis do arquivo `.env`
-
-Crie o `.env` no host. Nunca publique esse arquivo no Git ou no registry.
-
-### 5.1 Parametros opcionais do Protheus
-
-```dotenv
-Setup_rotina=SIGAADV
-Setup_ambiente=bf
-Setup_emp=01
-```
-
-- `Setup_rotina`: rotina inicial. Se ausente, usa `SIGAADV`.
-- `Setup_ambiente`: ambiente inicial. Se ausente, usa `Environment` do `config.json` ou `bf`.
-- `Setup_emp`: empresa/grupo/filial. Se ausente, a tela de empresa/filial e ignorada.
-
-### 5.2 Microsoft Graph e MFA
-
-```dotenv
-GRAPH_CLIENT_ID=seu-client-id
-GRAPH_TENANT_ID=seu-tenant-id
-GRAPH_CLIENT_SECRET=seu-client-secret
-BOT_USER_EMAIL=caixa.mfa@exemplo.com
-FOLDER_ID=inbox
-```
-
-Esses valores sao usados para obter um token de aplicacao e consultar a pasta de e-mail indicada.
-
-O fluxo procura uma mensagem recebida nos ultimos cinco minutos e extrai somente os digitos encontrados em uma `div` cuja classe contenha `code`, como `x_code`.
-
-O aplicativo do Microsoft Graph precisa ter permissao de aplicacao para leitura de e-mails e consentimento administrativo, conforme a politica do tenant.
-
-### 5.3 Oracle
-
-```dotenv
-usernamedb=usuario_oracle
-passworddb=senha_oracle
-dsnhomol=host:1521/service_name
-usuario=usuario_responsavel
-```
-
-O modulo `LogBanco.py` usa esses valores para:
-
-- registrar inicio da execucao;
-- registrar cada atualizacao do cronometro;
-- registrar erros e avisos;
-- registrar o fechamento do navegador;
-- consultar o ultimo tempo de execucao para avaliar duracao elevada.
-
-A tabela esperada e `RPA.TIMER`, com as colunas usadas pelo codigo:
-
-`ID_EXECUCAO`, `DESCRICAO`, `SISTEMA`, `USUARIO`, `ERRO`, `TEMPO_EXECUCAO` e `HORARIO_EXECUCAO`.
-
-### 5.4 SMTP
-
-```dotenv
-server_smtp=smtp.exemplo.com.br
-port=587
-sender_mail=robot@exemplo.com.br
-password=senha_smtp
-```
-
-Os dados SMTP sao usados para enviar alertas quando:
-
-- a URL do Protheus nao responde;
-- ocorre erro no fluxo;
-- aparece uma linha `FAILED` durante o processamento de logs;
-- o tempo da rotina ultrapassa o limite comparado com a ultima execucao.
-
-## 6. Construir a imagem localmente
-
-Execute na pasta que contem o `Dockerfile`:
+### 5.1 No Windows (desenvolvimento e testes)
 
 ```powershell
 cd C:\scripts_python\playwright_timer
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+python -m playwright install firefox
 
-docker build -t playwright-webagent:latest .
+copy config.example.json config.json   # e preencha
+copy .env.example .env                 # e preencha
+
+python main_playwright.py --headed     # mostra o navegador (bom para acompanhar)
+python main_playwright.py --headless   # sem janela
 ```
 
-O build instala:
+O TOTVS WebAgent precisa estar instalado e aberto no Windows (o mesmo que você usa para abrir o Protheus no navegador).
 
-- Python 3.12;
-- dependencias de `requirements.txt`;
-- Firefox do Playwright;
-- bibliotecas Linux necessarias ao navegador;
-- Supervisor;
-- Xvfb e D-Bus;
-- pacote `webagent/linux-x64-release.deb`.
-
-O arquivo `.dockerignore` impede que `config.json` e `.env` sejam enviados para o contexto do build.
-
-## 7. Executar a imagezm
-No Windows PowerShell:
+Para regerar o mapa de calor sem rodar o robô:
 
 ```powershell
-Esse exemplo preserva os logs. As screenshots sao gravadas na raiz de trabalho `/app`; para preserva-las, use um container sem `--rm`, copie os arquivos com `docker cp` antes de remove-lo e depois execute `docker rm`. Evite montar todo `/app` sobre a imagem, pois isso pode esconder os arquivos do projeto.
-  -v "C:\scripts_python\playwright_timer\config.json:/app/config.json:ro" `
-  -v "C:\scripts_python\playwright_timer\.env:/app/.env:ro" `
-  -v "C:\scripts_python\playwright_timer\log_playwright:/app/log_playwright" `
+python mapa_calor.py log_playwright               # lê o banco (últimos 60 dias)
+python mapa_calor.py log_playwright --dias 90
+python mapa_calor.py log_playwright --fonte arquivos   # só os JSONs locais
+```
+
+### 5.2 No Docker (produção)
+
+O container sobe o **TOTVS WebAgent** num display virtual (Xvfb), espera a porta `21021`, roda **uma execução** e se encerra. `config.json` e `.env` entram por volume (não vão para a imagem).
+
+```bash
+# gerar e publicar a imagem
+docker build --no-cache -t hiannyurt/playwright-webagent:latest .
+docker push hiannyurt/playwright-webagent:latest
+
+# rodar no servidor Linux
+docker run --pull always --rm -it -e TZ=America/Cuiaba \
+  -v /etc/localtime:/etc/localtime:ro \
+  -v /python_bf/playwright_timer/config.json:/app/config.json:ro \
+  -v /python_bf/playwright_timer/.env:/app/.env:ro \
+  -v /python_bf/playwright_timer/idExec.json:/app/idExec.json \
+  -v /python_bf/playwright_timer/log_playwright:/app/log_playwright \
   hiannyurt/playwright-webagent:latest
 ```
 
-No Linux:
+No Windows (PowerShell), troque os caminhos dos volumes, por exemplo `-v "C:\scripts_python\playwright_timer\config.json:/app/config.json:ro"`.
 
-```bash
-docker run --pull always --rm -it  -e TZ=America/Cuiaba   -v /etc/localtime:/etc/localtime:ro   -v /python_bf/playwright_timer/config.json:/app/config.json:ro   -v /python_bf/playwright_timer/.env:/app/.env:ro   -v /python_bf/playwright_timer/idExec.json:/app/idExec.json   -v /python_bf/playwright_timer/log_playwright:/app/log_playwright   hiannyurt/playwright-webagent:teste
+- O volume de `log_playwright` preserva logs, prints, JSONs e o `mapa_calor.html` no servidor.
+- O volume de `idExec.json` mantém o contador de `ID_EXECUCAO` entre execuções.
+- **Atualizar o WebAgent:** coloque o novo `.deb`/`.rpm` em `webagent/` e refaça o `docker build`.
+- **Mudou código Python?** Refaça o `docker build`. **Mudou só rotinas/config?** Não precisa: o `config.json` vem do volume.
+
+### 5.3 Agendamento (Airflow)
+
+`BF_DockerPlaywright.py` é a DAG `Docker_playwright`: roda **de hora em hora, no minuto 30**, chamando `run_docker.py`, que executa o container acima. `max_active_runs = 1` impede duas execuções ao mesmo tempo.
+
+---
+
+## 6. Onde ver os resultados
+
+| Onde | O que tem |
+|---|---|
+| **Mapa de calor** — `log_playwright/mapa_calor.html` | Visão principal. Linhas = Login e rotinas; colunas = execuções; cor = normal / atenção / lenta / erro. Filtros, detalhes ao passar o mouse e visão em tabela. Regerado ao fim de cada execução. |
+| Log geral — `log_playwright/<data>_protheus_timer.log` | Toda a execução, com o **resumo dos tempos** no final. |
+| Log por item — `log_playwright/rotinas/` | Um arquivo para o login (`r00`) e um por rotina (`r01`, `r02`...). |
+| Prints — `log_playwright/*.png` | `fluxo_rNN_EE_<etapa>.png` a cada clique; `timeout_*.png` quando algo não aparece (tirado antes de qualquer Esc). |
+| JSON — `log_playwright/tempos_rotinas_<id>.json` | Tempos da execução (fallback do mapa se o banco cair). |
+| Banco — `RPA.TIMER` | Tudo, com o mesmo `ID_EXECUCAO` por execução (ver abaixo). |
+
+**Mapa de calor — como ler:** o "normal" de cada rotina é a **mediana das últimas 10 execuções sem erro**. ✓ normal (até +15%), ▲ atenção (+15% a +30%), ▲▲ lenta (mais de +30%, mesmo limite do e-mail), ✕ erro, – não executada. Os limites ficam no topo de `mapa_calor.py`. **Abra o arquivo de `log_playwright/`** — o `mapa_calor_template.html` da raiz é só o modelo.
+
+**O que vai para o `RPA.TIMER`** (colunas `ID_EXECUCAO, DESCRICAO, SISTEMA, USUARIO, ERRO, TEMPO_EXECUCAO, HORARIO_EXECUCAO`):
+
+| Quando | `DESCRICAO` (exemplo) | `TEMPO_EXECUCAO` |
+|---|---|---|
+| Início | `[0000s] - Início do cronômetro Playwright` | 0 |
+| A cada segundo | `[0042s] - <o que o robô está fazendo>` | 1 |
+| Fim de cada item | `[0278s] - Tempo Login: 70.9s` / `[0345s] - Tempo Rotina 'Pedidos de Compra': 12.3s (com erro: <motivo>)` | segundos do item |
+| Fim | `[0400s] - Finalizando execução` ou `ERRO EM ROTINA(S): ...` | tempo total |
+| Após o fim | uma linha por linha do log geral | 1 |
+
+Consultas úteis:
+
+```sql
+-- Tempo de cada rotina, mais recentes primeiro
+SELECT ID_EXECUCAO, HORARIO_EXECUCAO, ERRO, TEMPO_EXECUCAO, DESCRICAO
+  FROM RPA.TIMER
+ WHERE SISTEMA = 'PROTHEUS'
+   AND DESCRICAO LIKE '%- Tempo %'
+ ORDER BY HORARIO_EXECUCAO DESC;
+
+-- Passo a passo de uma execução
+SELECT HORARIO_EXECUCAO, ERRO, DESCRICAO
+  FROM RPA.TIMER
+ WHERE ID_EXECUCAO = :id
+ ORDER BY HORARIO_EXECUCAO;
 ```
 
-### Por que usar os volumes
+---
 
-O script procura os arquivos em:
+## 7. Erros e alertas
 
-```text
-/app/config.json
-/app/.env
-```
+| Situação | O que o robô faz | Alerta |
+|---|---|---|
+| URL do Protheus não responde | Encerra a execução | E-mail "Base do Protheus indisponível" |
+| Falha no login (Playwright) | Refaz a execução inteira até `ExecutionRetries` vezes | E-mail de falha ao esgotar |
+| Janela **"Excedeu numero de licenças"** | Reconhece a tela, registra `ERRO LICENCA PROTHEUS` e **não** tenta de novo (não libera licença) | E-mail "Licenças do Protheus esgotadas" |
+| Item do menu ou ação não responde ao clique | Clica de novo (`MenuRetries` / `AcaoRetries`); depois marca a rotina com erro | — |
+| Rotina com erro | Marca a rotina, fecha a tela e **segue para a próxima** | E-mail de falha |
+| Não consegue voltar à tela principal | Rotinas restantes ficam "NAO EXECUTADA" | — |
+| Execução sem erro, mas > 30% acima da média das últimas 10 | Conclui normalmente | E-mail "Tempo acima da média" |
 
-O sufixo `:ro` monta os arquivos como somente leitura. Assim, as credenciais ficam no host e nao sao gravadas na imagem.
+Os destinatários de cada e-mail estão em `MandaEmail.py`.
 
-Se o container reclamar que `config.json` nao existe, confira se o caminho do host esta correto. O mesmo vale para `.env`.
+---
 
-## 8. Publicar em um registry
+## 8. Testes
 
-### Docker Hub
-
-1. Autentique-se:
+Os testes não precisam de Protheus, Oracle nem navegador:
 
 ```powershell
-docker login
+python -m unittest discover -s tests -v
 ```
 
-2. Gere a imagem, se necessario:
+| Arquivo | Cobre |
+|---|---|
+| `tests/test_rotinas.py` | Leitura das rotinas (`Rotinas`, `Fluxo`, `--fluxo`) e relatório JSON |
+| `tests/test_erros_protheus.py` | Reconhecimento da mensagem de licenças |
+| `tests/test_mapa_calor.py` | Classificação normal/atenção/lenta/erro, leitura das linhas do banco e fallback |
 
-```powershell
-docker build -t playwright-webagent:latest .
-```
+Para testar uma rotina nova de ponta a ponta, rode com `--headed` e `--fluxo` (ver 4.2) e confira os prints `fluxo_*.png`.
 
-3. Crie uma tag com seu usuario:
+---
 
-```powershell
-docker tag playwright-webagent:latest SEU_USUARIO/playwright-webagent:1.0.0
-docker tag playwright-webagent:latest SEU_USUARIO/playwright-webagent:latest
-```
+## 9. Diagnóstico rápido
 
-4. Publique as tags:
+| Sintoma no log | Causa provável / o que fazer |
+|---|---|
+| `Item 'X' não encontrado dentro de 'Y'` | O texto da etapa não bate com o menu (confira no Protheus, sem o contador) ou o usuário não tem acesso à rotina. |
+| `Item 'X' do menu foi clicado 2x, mas a rotina não abriu` | Protheus lento ou travado; aumente `RotinaAbrirTimeout` / `MenuRetries`. |
+| `Clique em 'Visualizar' não teve efeito ... clicando de novo` | Tela ainda carregando; o robô se recupera. Se for frequente, aumente `PausaAntesAcao`. |
+| `Elemento 'X' não foi encontrado dentro de Nms` | O botão não apareceu. Veja o `timeout_X_*.png` para saber em que tela o robô estava. |
+| `Codigo de MFA ... vazio ou inválido` | E-mail não chegou em `MfaTimeout`, ou credenciais/permissão do Graph, `BOT_USER_EMAIL` ou `FOLDER_ID` errados. |
+| `(535, '5.7.3 Authentication unsuccessful')` | Senha do `sender_mail` no `.env` recusada pelo SMTP (expirada ou trocada). |
+| `Mapa de calor: banco indisponível ...; usando os JSONs locais` | Sem acesso ao Oracle naquela máquina; o mapa sai só com as execuções locais. |
+| Container parado em `Aguardando TOTVS WebAgent subir na porta 21021` | WebAgent não iniciou: confira o `.deb` em `webagent/` e refaça o build. |
+| `app (exit status 0; expected)` no Docker | Não é erro: o Python terminou normalmente e o container vai encerrar. |
 
-```powershell
-docker push SEU_USUARIO/playwright-webagent:1.0.0
-docker push SEU_USUARIO/playwright-webagent:latest
-```
+Para ver também as linhas técnicas (cada `INSERT` no banco, tracebacks completos), ative o nível `DEBUG` em `logging_config.py`.
 
-5. Em outro servidor, execute com a imagem publicada:
+---
 
-```powershell
-docker pull SEU_USUARIO/playwright-webagent:1.0.0
-docker run --rm -it `
-  -v "C:\caminho\config.json:/app/config.json:ro" `
-  -v "C:\caminho\.env:/app/.env:ro" `
-  SEU_USUARIO/playwright-webagent:1.0.0
-```
+## 10. Segurança
 
-Prefira tags fixas, como `1.0.0`, em processos agendados. A tag `latest` pode mudar sem aviso.
-
-## 9. Funcionamento do encerramento
-
-O `supervisord` e o processo principal do container. Ele gerencia dois programas:
-
-- `webagent`: executado com `dbus-run-session` e `xvfb-run`;
-- `app`: aguarda a porta `21021` e executa o Python.
-
-Quando `main_playwright.py` termina, o comando do `app` salva o status, envia `SIGTERM` para o processo 1 (`supervisord`) e retorna o status original. O Supervisor encerra o WebAgent e o Docker finaliza o container.
-
-Por isso, ao usar `--rm`, o container e removido depois da execucao.
-
-## 10. Logs e arquivos gerados
-
-Os logs de aplicacao sao criados em:
-
-```text
-/app/log_playwright/
-```
-
-O fluxo tambem pode gerar screenshots no diretorio de trabalho do container, por exemplo:
-
-```text
-tela_login.png
-Visualizar_tentativa_1.png
-Cancelar.png
-sair.png
-```
-
-Como o container e removido com `--rm`, esses arquivos desaparecem ao final se nao forem montados em um diretorio do host. Para preserva-los:
-
-```powershell
-docker run --rm -it TZ=America/Cuiaba `
-  -v "/etc/localtime:/etc/localtime:ro" `
-  -v "C:\scripts_python\playwright_timer\config.json:/app/config.json:ro" `
-  -v "C:\scripts_python\playwright_timer\.env:/app/.env:ro" `
-  -v "C:\scripts_python\playwright_timer\saida:/app/log_playwright" `
-  -v "C:\scripts_python\playwright_timer\screenshots:/app" `
-  playwright-webagent:latest
-```
-
-Evite montar todo `/app` sobre a imagem, pois isso pode esconder os arquivos do projeto. Prefira montar somente pastas de saida especificas.
-
-## 11. Execucao manual fora do Supervisor
-
-Para testar o script diretamente em um ambiente Python que ja tenha as dependencias instaladas:
-
-```powershell
-python main_playwright.py --headless
-```
-
-Para abrir o navegador com interface:
-
-```powershell
-python main_playwright.py --headed
-```
-
-Esses argumentos alteram o modo do navegador. No container, o comando padrao do Supervisor nao passa argumentos extras; o modo usado normalmente vem de `Headless` no `config.json`.
-
-## 12. Diagnostico rapido
-
-### `app (exit status 0; expected)`
-
-Essa mensagem significa que o Python terminou normalmente. Ela nao e um erro. O container deve finalizar em seguida quando o Supervisor encerra o WebAgent.
-
-### O container fica aguardando a porta `21021`
-
-Verifique:
-
-- se `webagent/linux-x64-release.deb` esta presente antes do build;
-- se o WebAgent iniciou sem erro;
-- se a imagem foi reconstruida depois de alterar o Dockerfile;
-- se a porta `21021` esta sendo aberta pelo WebAgent dentro do container.
-
-### Erro ao carregar `config.json`
-
-Confira o volume e o arquivo no host:
-
-```powershell
-test-path C:\scripts_python\playwright_timer\config.json
-```
-
-O arquivo precisa ser JSON valido e conter pelo menos `Url`, `User` e `Password`.
-
-### MFA nao encontrado
-
-Confira:
-
-- credenciais do Microsoft Graph;
-- permissao de leitura da caixa de e-mail;
-- `BOT_USER_EMAIL`;
-- `FOLDER_ID`;
-- horario da mensagem, que precisa estar dentro dos ultimos cinco minutos;
-- se o corpo do e-mail possui uma `div` com classe contendo `code`.
-
-### Falha de conexao com Oracle
-
-Confira `usernamedb`, `passworddb` e `dsnhomol`, alem da rota de rede do container ate o banco. A conexao e feita durante a inicializacao do cronometro, portanto o erro pode aparecer antes do login no Protheus.
-
-### E-mail de erro nao foi enviado
-
-Confira os quatro parametros SMTP e a conectividade com o servidor. O envio usa STARTTLS e porta padrao `587` quando `port` nao e informado.
-
-## 13. Seguranca
-
-- Nao publique `config.json` com usuario e senha reais.
-- Nao publique `.env`, tokens, client secrets ou senhas SMTP/Oracle.
-- Mantenha `config.json` e `.env` fora do Git, usando o `.gitignore`.
-- Se credenciais reais ja foram versionadas ou enviadas ao Docker Hub, troque-as imediatamente.
-- Use tags versionadas e controle quem pode fazer pull da imagem.
-- Evite colocar segredos em argumentos de `docker build`, pois eles podem ficar registrados no historico da imagem.
-
-## 14. Fluxo resumido
-
-```text
-Docker
-  -> supervisord
-      -> WebAgent + Xvfb + D-Bus
-      -> aguarda TCP 21021
-      -> main_playwright.py
-          -> Protheus
-          -> Microsoft Graph/MFA
-          -> Oracle/RPA.TIMER
-          -> SMTP em caso de alerta
-      -> fecha navegador
-      -> encerra supervisord
-  -> container finalizado
-```
+- `config.json` e `.env` têm senhas: **nunca versione nem coloque na imagem**. Eles estão no `.gitignore` e no `.dockerignore`; use os arquivos `*.example` como modelo.
+- Se uma credencial real já foi para o git ou para o Docker Hub, **troque-a**.
+- Não passe segredos em `docker build --build-arg` (ficam no histórico da imagem).
+- Prefira tags fixas da imagem (ex.: `1.0.0`) em agendamentos; `latest` pode mudar sem aviso.

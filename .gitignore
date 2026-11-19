@@ -3,3 +3,5 @@ log/*
 __pycache__/
 log_playwright/*
 *.json
+# o modelo de configuração deve ir para o git (ver README)
+!config.example.json

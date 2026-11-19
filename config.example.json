@@ -1,0 +1,45 @@
+{
+    "_LEIA_ME": "Copie para config.json e troque os valores. Chaves que começam com _ são ignoradas. Explicação de cada chave no README (seção 4.1).",
+
+    "Url": "https://protheus.suaempresa.com.br/webapp/",
+    "Environment": "bf",
+    "User": "usuario.do.rpa",
+    "Password": "TROQUE_PELA_SENHA",
+
+    "Browser": "firefox",
+    "Headless": true,
+
+    "Rotinas": [
+        {
+            "Nome": "Pedidos de Compra",
+            "Fluxo": "Compras > Movimento > Pedidos de Compra > Visualizar > Cancelar > sair"
+        },
+        {
+            "Nome": "Documento de entrada",
+            "Fluxo": "Fiscal > Movimento > Documento Entrada > Visualizar > Cancelar > sair"
+        }
+    ],
+
+    "TimeOut": 30,
+    "ParametrosTimeout": 60000,
+    "EmpresaTimeout": 15000,
+    "EntrarTimeout": 15000,
+    "MfaTimeout": 60000,
+
+    "MenuTimeout": 70000,
+    "MenuStepTimeout": 20000,
+    "MenuRetries": 2,
+    "RotinaAbrirTimeout": 60000,
+
+    "PausaAntesAcao": 2000,
+    "RotinaTimeout": 60000,
+    "AcaoEfeitoTimeout": 15000,
+    "AcaoRetries": 2,
+
+    "FecharRotinaTimeout": 10000,
+    "VoltarTelaTimeout": 15000,
+    "VoltarTelaTentativas": 3,
+
+    "ExecutionRetries": 2,
+    "MapaCalorDias": 60
+}
